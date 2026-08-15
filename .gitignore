@@ -45,6 +45,3 @@ application/config/database.php
 
 .vscode
 application/logs/*
-
-# Apenas o htacess da raiz, não includes htaccess dentro das pastas
-/.htaccess

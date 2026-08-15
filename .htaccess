@@ -1,0 +1,38 @@
+# ============================================================
+# .htaccess — plataforma-crm (CodeIgniter)
+# Único para todas as instâncias. Não versionar variações.
+# ============================================================
+
+# --- Ambiente -----------------------------------------------
+# Produção por padrão; apenas hosts locais viram development.
+SetEnvIf Host ^ CI_ENV=production
+SetEnvIf Host ^(localhost|127\.0\.0\.1|.+\.(local|test))(:\d+)?$ CI_ENV=development
+
+# --- Diretório ----------------------------------------------
+Options -Indexes +FollowSymLinks
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Bloqueia dotfiles (.git, .env, .environment), exceto .well-known
+    RewriteRule (^|/)\.(?!well-known)[^/]+ - [F,L]
+
+    # Força HTTPS em qualquer domínio, exceto ambiente local.
+    # X-Forwarded-Proto evita loop atrás de proxy/CDN.
+    RewriteCond %{HTTPS} off
+    RewriteCond %{HTTP:X-Forwarded-Proto} !https
+    RewriteCond %{HTTP_HOST} !^(localhost|127\.0\.0\.1|.+\.(local|test))(:\d+)?$ [NC]
+    RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+    # Rota específica
+    RewriteRule ^mcp/docs/?$ index.php?/mcp/docs [QSA,L]
+
+    # Front controller
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule .* index.php?/$0 [QSA,L]
+</IfModule>
+
+<IfModule !mod_rewrite.c>
+    ErrorDocument 404 /index.php
+</IfModule>
