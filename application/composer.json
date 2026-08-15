@@ -1,0 +1,31 @@
+{
+    "type": "projeto",
+    "description": "Projeto de CRM",
+    "keywords": [
+        "nfe",
+        "crm",
+        "sistema"
+    ],
+    "license": [
+        "LGPL-3.0-or-later",
+        "GPL-3.0-or-later",
+        "MIT"
+    ],
+    "authors": [
+        {
+            "name": "Willyan Carlos Baldin",
+            "email": "willyancarlos@gmail.com",
+            "homepage": "https://www.cdwtech.com.br",
+            "role": "Developer"
+        }
+    ],
+    "require": {
+        "myclabs/deep-copy": "^1.10",
+        "phpoffice/phpword": "^0.18.1",
+        "phpoffice/phpspreadsheet": "^1.17",
+        "ext-curl": "*",
+        "ext-json": "*",
+        "ext-gd": "*",
+        "phpseclib/phpseclib": "^3.0"
+    }
+}

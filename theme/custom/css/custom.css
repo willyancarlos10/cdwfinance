@@ -1,0 +1,148 @@
+:root {
+  --bs-font-sans-serif: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --bs-body-font-family: var(--bs-font-sans-serif);
+  --bs-btn-font-family: var(--bs-font-sans-serif);
+}
+.table>:not(caption)>*>* {
+  padding: 0.55rem !important;
+}
+
+html,
+body,
+button,
+input,
+optgroup,
+select,
+textarea,
+.btn,
+.form-control,
+.input-group-text,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.h1,
+.h2,
+.h3,
+.h4,
+.h5,
+.h6 {
+  font-family: var(--bs-font-sans-serif) !important;
+}
+
+body {
+  font-size: 0.90rem !important;
+}
+.sidebar-content {
+  background-color: #040505;
+}
+.tab .nav-tabs .nav-link {
+  padding: 0.46rem 0.6rem !important;
+}
+.sidebar-nav {
+  padding: 0px 10px 0px 10px;
+}
+#sidebar {
+  --sidebar-submenu-padding-left: 3.325rem;
+}
+.sidebar-link,
+a.sidebar-link {
+  padding: 0.425rem 1.125rem !important;
+}
+.sidebar-link.active {
+  padding: 0.425rem 1.625rem !important;
+}
+body:not([data-sidebar-behavior="compact"])
+  #sidebar
+  .sidebar-dropdown
+  > .sidebar-item
+  > .sidebar-link {
+  padding-left: var(--sidebar-submenu-padding-left) !important;
+}
+/* Recuo progressivo e genérico para submenus aninhados (dropdown dentro de dropdown).
+ Vale para qualquer menu nesse formato (ex.: "Gestão de estoques" dentro de "Distribuidor"),
+ sem precisar de regra por ID. Cada nível ganha um recuo adicional sobre o pai. */
+#sidebar
+  .sidebar-nav
+  .sidebar-dropdown
+  .sidebar-dropdown
+  > .sidebar-item
+  > .sidebar-link {
+  padding-left: calc(var(--sidebar-submenu-padding-left) + 1.275rem) !important;
+}
+#sidebar
+  .sidebar-nav
+  .sidebar-dropdown
+  .sidebar-dropdown
+  .sidebar-dropdown
+  > .sidebar-item
+  > .sidebar-link {
+  padding-left: calc(var(--sidebar-submenu-padding-left) + 2.55rem) !important;
+}
+.sidebar-header {
+  padding: 0px;
+}
+.sidebar-nav > .sidebar-item.active > .sidebar-link {
+  /* margin: 0px 10px 0px 10px; */
+  background: #09e968;
+  border-radius: 5px;
+  color: #333;
+}
+.sidebar-nav > .sidebar-item.active > .sidebar-link i {
+  color: #333;
+}
+.sidebar-dropdown .sidebar-item.active .sidebar-link {
+  color: #09e968;
+}
+.sidebar-nav > .sidebar-item.active > .sidebar-link.active {
+  background: #09e968;
+  /* margin: 0px 10px 0px 10px; */
+  border-radius: 3px;
+  /* padding: 5px 10px; */
+}
+
+body[data-theme="dark"] .sidebar-dropdown .sidebar-item.active .sidebar-link,
+body[data-theme="light"] .sidebar-dropdown .sidebar-item.active .sidebar-link {
+  color: #ffffff !important;
+}
+
+.color-nithom,
+.bg-color-nithom {
+  background-color: #c67020 !important;
+}
+
+.color-sengi-energi,
+.bg-color-sengi-energi {
+  background-color: #17869a !important;
+}
+
+bg-color-sengi-energi .border-custom {
+  border: 1px solid #e8e8e8;
+  border-radius: 5px;
+  padding: 5px 10px 5px 30px;
+}
+.dropzone {
+  background-color: #f4f4f4 !important;
+}
+
+.fr-box.fr-basic .fr-element {
+  color: #6b6b6b !important;
+}
+
+.fr-box.fr-basic .fr-element a:hover {
+  color: #3949ab !important;
+}
+/* O Bootstrap 5.3 traz utilitárias de object-fit, mas nenhuma de object-position:
+   com cover, o corte fica no centro e não há classe para ancorá-lo (tela de login). */
+.object-position-top {
+  object-position: top;
+}
+
+/* Campos somente leitura: fundo diferenciado para deixar claro que o valor
+   não é editável (ex.: domínio travado na edição do domínio do contrato). */
+input.form-control[readonly],
+textarea.form-control[readonly] {
+  background-color: #f5f4f4;
+}

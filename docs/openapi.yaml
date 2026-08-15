@@ -1,0 +1,203 @@
+openapi: 3.0.3
+
+info:
+  title: CDW Finance — API pública
+  version: 1.0.0
+  description: |
+    API pública do CDW Finance, versionada sob `/api/v1`.
+
+    **Ainda não há operações publicadas.** Esta especificação documenta o
+    contrato que toda operação futura deve seguir — autenticação, envelope de
+    resposta, paginação e códigos HTTP — e serve de referência para o primeiro
+    endpoint do financeiro.
+
+    ### Autenticação
+
+    Toda requisição exige uma chave de API no cabeçalho:
+
+    ```
+    Authorization: Bearer gcms_live_<prefixo>_<segredo>
+    ```
+
+    As chaves são geradas por empresa no painel, em **Empresas › Chaves de API**.
+    O sistema guarda apenas o hash: a chave completa é exibida uma única vez, na
+    geração. Cada chave carrega uma lista de escopos e pode ser revogada a
+    qualquer momento.
+
+    **O escopo por empresa é derivado da chave no servidor.** Nenhuma operação
+    aceita `id_company` por query, corpo ou rota.
+
+    ### Limite de requisições
+
+    As chamadas são limitadas por chave. Ao estourar o limite a resposta é
+    `429`, acompanhada do cabeçalho `Retry-After` com os segundos de espera.
+
+servers:
+  - url: /api/v1
+    description: Servidor atual
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Financeiro
+    description: |
+      Operações do financeiro. Nenhuma publicada até o momento — ao criar a
+      primeira, documente-a aqui e registre a rota acima do catch-all em
+      `application/config/routes.php`.
+
+paths: {}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Chave opaca gerada no painel (não é JWT), no formato
+        `gcms_live_<prefixo de 12 hex>_<segredo de 43 chars>`.
+
+  schemas:
+    Envelope:
+      type: object
+      description: Formato de toda resposta da API, com sucesso ou com erro.
+      required: [success, message, data, errors]
+      properties:
+        success:
+          type: boolean
+          description: Indica se a operação foi concluída.
+          example: true
+        message:
+          type: string
+          description: Mensagem legível, em PT-BR.
+          example: Operação realizada com sucesso.
+        data:
+          nullable: true
+          description: Conteúdo da resposta. `null` quando não há retorno.
+        errors:
+          type: object
+          additionalProperties:
+            type: string
+          description: Erros por campo. Objeto vazio quando não há erro.
+          example: {}
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    Meta:
+      type: object
+      description: Presente apenas em listagens paginadas.
+      properties:
+        page:
+          type: integer
+          minimum: 1
+          example: 1
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          example: 20
+        total:
+          type: integer
+          example: 137
+
+    Erro:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            success:
+              example: false
+            data:
+              example: null
+
+  parameters:
+    page:
+      name: page
+      in: query
+      description: Página da listagem, começando em 1.
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    limit:
+      name: limit
+      in: query
+      description: Itens por página.
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  responses:
+    NaoAutenticado:
+      description: Chave ausente, malformada, inválida ou revogada.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            success: false
+            message: Chave de API inválida.
+            data: null
+            errors:
+              authorization: Chave de API inválida.
+
+    SemPermissao:
+      description: A chave é válida, mas não possui o escopo exigido.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            success: false
+            message: Esta chave não possui a permissão necessária.
+            data: null
+            errors:
+              scope: 'Escopo obrigatório: invoices:read'
+
+    NaoEncontrado:
+      description: Recurso inexistente ou fora do escopo da empresa da chave.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            success: false
+            message: Endpoint não encontrado.
+            data: null
+            errors:
+              path: Nenhum endpoint da API v1 corresponde a este caminho.
+
+    NaoProcessavel:
+      description: Requisição bem formada, mas com dados que não passam na validação.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            success: false
+            message: Parâmetro limit inválido.
+            data: null
+            errors:
+              limit: Informe um inteiro entre 1 e 100.
+
+    LimiteExcedido:
+      description: Limite de requisições da chave excedido.
+      headers:
+        Retry-After:
+          description: Segundos até a próxima tentativa permitida.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            success: false
+            message: Limite de requisições excedido.
+            data: null
+            errors:
+              rate_limit: Tente novamente em 42 segundos.
