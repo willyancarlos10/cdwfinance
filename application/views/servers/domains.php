@@ -7,6 +7,39 @@ $badgeTipo = [
   'manual' => 'bg-dark',
 ];
 
+/** Catálogo das faixas de WHOIS — usado no chip e no select do offcanvas. */
+$faixas = [
+  'vencido' => 'Vencidos',
+  'vence_30' => 'Vencem em 30 dias',
+  'ok' => 'Em dia',
+  'livre' => 'Livres (não registrados)',
+  'pendente' => 'Não consultados',
+  'erro' => 'Com erro na consulta',
+  'sem_vencimento' => 'Sem vencimento informado',
+];
+$situacoes = ['ativo' => 'Ativo', 'suspenso' => 'Suspenso'];
+
+$fKeyword = isset($filtro['keyword']) ? trim((string) $filtro['keyword']) : '';
+$fServidor = isset($filtro['id_server']) ? (int) $filtro['id_server'] : 0;
+$fStatus = isset($filtro['status']) ? (string) $filtro['status'] : '';
+$fBucket = isset($filtro['whois_bucket']) ? (string) $filtro['whois_bucket'] : '';
+
+// Chips do que está ESCONDIDO no offcanvas — sem eles o usuário não tem como
+// saber por que a listagem está curta. A busca não entra aqui: ela tem campo
+// próprio, visível e preenchido, no topo do card.
+$chips = [];
+if ($fServidor > 0) {
+  foreach ($servers as $s) {
+    if ((int) $s->id === $fServidor) $chips[] = 'Servidor: ' . $s->name;
+  }
+}
+if ($fStatus !== '' && isset($situacoes[$fStatus])) $chips[] = 'Situação: ' . $situacoes[$fStatus];
+if ($fBucket !== '' && isset($faixas[$fBucket])) $chips[] = 'WHOIS: ' . $faixas[$fBucket];
+
+// "Tem algum filtro aplicado?" é pergunta diferente de "tem chip?": a busca
+// visível também recorta a listagem e também precisa do LIMPAR.
+$temFiltro = ($fKeyword !== '' || !empty($chips));
+
 /**
  * Exibe MB em GB quando passa de 1024, para a coluna não virar um paredão de
  * números. Sem valor vindo do painel, mostra travessão.
@@ -67,64 +100,120 @@ if (!function_exists('prazo_vencimento_whois')) {
 
 <div class="card flex-fill">
   <div class="card-body py-3">
-    <form method="POST" name="form" action="<?php echo base_url('servidores/post_filtrar_dominios'); ?>" enctype="multipart/form-data">
-      <div class="row">
-        <div class="col-md-3">
-          <div class="form-group mb-3">
-            <label class="form-label">Buscar</label>
-            <input type="text" placeholder="Domínio, usuário ou IP..." class="form-control" name="f_server_domains[keyword]" value="<?php echo htmlspecialchars(isset($filtro['keyword']) ? $filtro['keyword'] : '', ENT_QUOTES, 'UTF-8'); ?>" autocomplete="off">
+    <?php
+    // Busca por palavra-chave fora do offcanvas: é o filtro usado o tempo todo
+    // e escondê-lo custava dois cliques por consulta. Formulário próprio, com o
+    // mesmo destino do offcanvas — o post_filtrar_dominios faz merge sobre o
+    // filtro da sessão, então buscar aqui NÃO derruba servidor, situação nem
+    // faixa de WHOIS que estejam marcados lá dentro.
+    //
+    // A ordenação viaja neste mesmo formulário, em `ordem`, FORA do array
+    // `f_server_domains`: aquele array vira `WHERE campo = valor` no
+    // Global_model, e ordenação não é filtro. Ela fica visível de propósito —
+    // não é filtro, então não vira chip nem entra no LIMPAR, e escondida atrás
+    // do botão FILTROS ninguém acharia.
+    $ordemAtual = isset($ordenacao_atual) ? (string) $ordenacao_atual : '';
+    ?>
+    <div class="row g-2 align-items-end">
+      <div class="col-12 col-md-5">
+        <form id="form_busca_dominios" method="POST" action="<?php echo base_url('servidores/post_filtrar_dominios'); ?>" role="search">
+          <div class="input-group">
+            <input type="text" class="form-control" name="f_server_domains[keyword]" value="<?php echo htmlspecialchars($fKeyword, ENT_QUOTES, 'UTF-8'); ?>" placeholder="Domínio, usuário ou IP..." autocomplete="off" aria-label="Buscar domínios">
+            <button class="btn btn-primary" type="submit" title="Esvazie o campo e busque de novo para ver todos"><i class="fa fa-search"></i> BUSCAR</button>
           </div>
-        </div>
-        <div class="col-md-3">
+          <?php
+          // O select da ordem mora DENTRO do formulário da busca (submete junto
+          // e é reenviado a cada busca, preservando a escolha). Sem select2: o
+          // dropdown dele é anexado ao body e brigaria com o empilhamento do
+          // offcanvas — e aqui não há ganho, são cinco opções fixas.
+          ?>
+          <select name="ordem" class="form-select form-select-sm mt-2 js-ordem-dominios" aria-label="Ordenar a listagem">
+            <?php foreach ($ordenacoes as $valor => $rotulo) { ?>
+              <option value="<?php echo htmlspecialchars($valor, ENT_QUOTES, 'UTF-8'); ?>" <?php if ($ordemAtual === (string) $valor) echo 'selected=""'; ?>>Ordenar por: <?php echo htmlspecialchars($rotulo, ENT_QUOTES, 'UTF-8'); ?></option>
+            <?php } ?>
+          </select>
+        </form>
+      </div>
+
+      <div class="col-12 col-md-7 text-md-end">
+        <button type="button" class="btn btn-outline-primary" data-bs-toggle="offcanvas" data-bs-target="#offcanvas_filtros_dominios" aria-controls="offcanvas_filtros_dominios">
+          <i class="fa fa-filter"></i> FILTROS
+          <?php if (!empty($chips)) { ?><span class="badge bg-primary ms-1"><?php echo count($chips); ?></span><?php } ?>
+        </button>
+        <?php if ($temFiltro) { ?>
+          <button type="submit" form="form_filtros_dominios" name="acao" value="limpar" class="btn btn-outline-secondary" title="Remove a busca e todos os filtros"><i class="fa fa-times"></i> LIMPAR</button>
+        <?php } ?>
+      </div>
+    </div>
+
+    <?php if (!empty($chips)) { ?>
+      <div class="mt-3">
+        <?php foreach ($chips as $chip) { ?>
+          <span class="badge bg-light text-dark border me-1"><?php echo htmlspecialchars($chip, ENT_QUOTES, 'UTF-8'); ?></span>
+        <?php } ?>
+      </div>
+    <?php } ?>
+
+    <?php
+    // O formulário mora no offcanvas para liberar o espaço da tela; o botão
+    // LIMPAR acima usa `form=` para submeter daqui de fora sem duplicar rota.
+    ?>
+    <div class="offcanvas offcanvas-end" tabindex="-1" id="offcanvas_filtros_dominios" aria-labelledby="offcanvas_filtros_dominios_titulo">
+      <div class="offcanvas-header border-bottom">
+        <h5 class="offcanvas-title" id="offcanvas_filtros_dominios_titulo"><i class="fa fa-filter"></i> Filtros</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Fechar"></button>
+      </div>
+      <form id="form_filtros_dominios" method="POST" action="<?php echo base_url('servidores/post_filtrar_dominios'); ?>">
+        <div class="offcanvas-body">
+          <?php
+          // A busca não é repetida aqui: ela vive no topo do card. Dois campos
+          // com o mesmo nome em formulários diferentes discordariam — o último
+          // submetido venceria, e o usuário veria a busca voltar sozinha ao
+          // valor antigo ao usar o outro formulário.
+          //
+          // Os três selects são `form-select` puro, sem select2, e todos enviam
+          // sempre (o "mostrar todos" é opção de valor vazio, não ausência do
+          // campo), para o merge do post_filtrar_dominios conseguir apagar um
+          // filtro que estava marcado.
+          ?>
           <div class="form-group mb-3">
             <label class="form-label">Servidor</label>
-            <select name="f_server_domains[id_server]" class="form-control select2">
-              <option value="">-- TODOS --</option>
+            <select name="f_server_domains[id_server]" class="form-select">
+              <option value="">-- MOSTRAR TODOS --</option>
               <?php foreach ($servers as $s) { ?>
-                <option <?php if (isset($filtro['id_server']) && (string) $filtro['id_server'] === (string) $s->id) echo 'selected=""'; ?> value="<?php echo (int) $s->id; ?>"><?php echo htmlspecialchars($s->name, ENT_QUOTES, 'UTF-8'); ?></option>
+                <option <?php if ($fServidor === (int) $s->id) echo 'selected=""'; ?> value="<?php echo (int) $s->id; ?>"><?php echo htmlspecialchars($s->name, ENT_QUOTES, 'UTF-8'); ?></option>
               <?php } ?>
             </select>
           </div>
-        </div>
-        <div class="col-md-2">
+
           <div class="form-group mb-3">
             <label class="form-label">Situação</label>
-            <select name="f_server_domains[status]" class="form-control select2">
-              <option value="">-- TODAS --</option>
-              <option value="ativo" <?php if (isset($filtro['status']) && $filtro['status'] === 'ativo') echo 'selected=""'; ?>>Ativo</option>
-              <option value="suspenso" <?php if (isset($filtro['status']) && $filtro['status'] === 'suspenso') echo 'selected=""'; ?>>Suspenso</option>
-            </select>
-          </div>
-        </div>
-        <div class="col-md-2">
-          <div class="form-group mb-3">
-            <label class="form-label">WHOIS</label>
-            <?php
-            $faixas = [
-              'vencido' => 'Vencidos',
-              'vence_30' => 'Vencem em 30 dias',
-              'ok' => 'Em dia',
-              'livre' => 'Livres (não registrados)',
-              'pendente' => 'Não consultados',
-              'erro' => 'Com erro na consulta',
-              'sem_vencimento' => 'Sem vencimento informado',
-            ];
-            $faixaAtual = isset($filtro['whois_bucket']) ? (string) $filtro['whois_bucket'] : '';
-            ?>
-            <select name="f_server_domains[whois_bucket]" class="form-control select2">
-              <option value="">-- TODOS --</option>
-              <?php foreach ($faixas as $valor => $rotulo) { ?>
-                <option value="<?php echo $valor; ?>" <?php if ($faixaAtual === $valor) echo 'selected=""'; ?>><?php echo $rotulo; ?></option>
+            <select name="f_server_domains[status]" class="form-select">
+              <option value="">-- MOSTRAR TODAS --</option>
+              <?php foreach ($situacoes as $alias => $rotulo) { ?>
+                <option <?php if ($fStatus === $alias) echo 'selected=""'; ?> value="<?php echo $alias; ?>"><?php echo $rotulo; ?></option>
               <?php } ?>
             </select>
+            <small class="form-text text-muted">Estado da conta no painel de hospedagem.</small>
+          </div>
+
+          <div class="form-group mb-3">
+            <label class="form-label">WHOIS</label>
+            <select name="f_server_domains[whois_bucket]" class="form-select">
+              <option value="">-- MOSTRAR TODOS --</option>
+              <?php foreach ($faixas as $valor => $rotulo) { ?>
+                <option value="<?php echo $valor; ?>" <?php if ($fBucket === $valor) echo 'selected=""'; ?>><?php echo $rotulo; ?></option>
+              <?php } ?>
+            </select>
+            <small class="form-text text-muted">Faixa de vencimento do registro, pela última consulta ao registrador.</small>
           </div>
         </div>
-        <div class="col-md-2">
-          <label class="form-label">&nbsp;</label><br />
-          <button type="submit" class="btn w-100 btn-primary btn-md"><i class="fa fa-filter"></i> FILTRAR</button>
+        <div class="offcanvas-header border-top d-block">
+          <button type="submit" class="btn btn-primary w-100 mb-2"><i class="fa fa-filter"></i> FILTRAR</button>
+          <button type="submit" name="acao" value="limpar" class="btn btn-outline-secondary w-100"><i class="fa fa-times"></i> LIMPAR FILTROS</button>
         </div>
-      </div>
-    </form>
+      </form>
+    </div>
 
     <?php if (!empty($results)) { ?>
       <hr>
@@ -327,6 +416,18 @@ if (!function_exists('prazo_vencimento_whois')) {
   // carregado no footer, ou seja, DEPOIS desta view. Referenciar $ aqui na hora
   // do parse estoura e nenhum handler chega a ser registrado.
   document.addEventListener("DOMContentLoaded", function() {
+    // Trocar a ordem aplica na hora: o select vive no formulário da busca, que
+    // leva junto a keyword atual — e o merge do servidor preserva os filtros do
+    // offcanvas. Sem isto, mudar a ordem exigiria clicar em BUSCAR, que não é o
+    // que o rótulo do botão promete.
+    var selectOrdem = document.querySelector('.js-ordem-dominios');
+    if (selectOrdem) {
+      selectOrdem.addEventListener('change', function() {
+        var form = document.getElementById('form_busca_dominios');
+        if (form) form.submit();
+      });
+    }
+
     // Domínio aberto no modal, para o botão ATUALIZAR WHOIS repetir a consulta
     // sem depender de qual botão da tabela a abriu.
     var whoisAtual = null;

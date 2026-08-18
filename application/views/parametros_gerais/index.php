@@ -54,6 +54,16 @@ if ($this->input->post('rdap') !== null) {
               RDAP .br
             </a>
           </li>
+          <li class="nav-item">
+            <a class="nav-link <?php if ($tabsDefault === 'tab_faturamento') echo 'active'; ?>" href="#tab_faturamento" data-bs-toggle="tab" role="tab" aria-selected="<?php echo $tabsDefault === 'tab_faturamento' ? 'true' : 'false'; ?>">
+              Faturamento
+            </a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link <?php if ($tabsDefault === 'tab_monitoramento') echo 'active'; ?>" href="#tab_monitoramento" data-bs-toggle="tab" role="tab" aria-selected="<?php echo $tabsDefault === 'tab_monitoramento' ? 'true' : 'false'; ?>">
+              Monitoramento
+            </a>
+          </li>
         </ul>
 
         <?php // Alertas fora do tab-content: dentro de uma aba só, o feedback da outra ficaria invisível. 
@@ -278,6 +288,149 @@ if ($this->input->post('rdap') !== null) {
                 <div class="col-md-4">
                   <button type="submit" class="btn btn-primary w-100">
                     <i class="mdi mdi-content-save"></i> SALVAR RDAP
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+
+          <?php
+          // O grupo `faturamento` só nasce no primeiro salvamento, então o valor
+          // exibido cai no default do model quando a chave ainda não existe —
+          // sem isso a tela abriria com os campos vazios e "salvar" gravaria
+          // zeros por cima de parâmetros que os motores já usam.
+          $fat = function ($chave) use ($faturamento_settings, $faturamento_defaults) {
+            $postado = $this->input->post('faturamento');
+            if (is_array($postado) && array_key_exists($chave, $postado)) {
+              return (string) $postado[$chave];
+            }
+            if (isset($faturamento_settings[$chave]) && $faturamento_settings[$chave] !== '') {
+              return (string) $faturamento_settings[$chave];
+            }
+            return (string) $faturamento_defaults[$chave];
+          };
+          ?>
+          <div class="tab-pane <?php if ($tabsDefault === 'tab_faturamento') echo 'active'; ?>" id="tab_faturamento" role="tabpanel">
+            <form method="POST" action="<?php echo base_url('parametros_gerais/post_faturamento'); ?>" class="mt-3">
+              <div class="row g-3">
+                <div class="col-md-4">
+                  <label class="form-label" for="faturamento_dias_antecedencia">* Gerar a fatura com quantos dias de antecedência</label>
+                  <input type="number" class="form-control" id="faturamento_dias_antecedencia" name="faturamento[faturamento_dias_antecedencia]" min="1" max="90" value="<?php echo htmlspecialchars($fat('faturamento_dias_antecedencia'), ENT_QUOTES, 'UTF-8'); ?>">
+                  <small class="text-muted">Contados a partir do vencimento.</small>
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label" for="faturamento_dia_padrao">* Dia de vencimento sugerido</label>
+                  <input type="number" class="form-control" id="faturamento_dia_padrao" name="faturamento[faturamento_dia_padrao]" min="1" max="31" value="<?php echo htmlspecialchars($fat('faturamento_dia_padrao'), ENT_QUOTES, 'UTF-8'); ?>">
+                  <small class="text-muted">Preenchido ao ligar o faturamento de um contrato.</small>
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label" for="reajuste_dias_aviso">* Avisar reajuste com dias de antecedência</label>
+                  <input type="number" class="form-control" id="reajuste_dias_aviso" name="faturamento[reajuste_dias_aviso]" min="1" max="180" value="<?php echo htmlspecialchars($fat('reajuste_dias_aviso'), ENT_QUOTES, 'UTF-8'); ?>">
+                  <small class="text-muted">O e-mail sai antes da data do reajuste.</small>
+                </div>
+
+                <div class="col-12">
+                  <hr class="my-2">
+                  <h5 class="mb-1">Aviso de reajuste ao cliente</h5>
+                  <p class="text-muted mb-0"><small>Mensagem enviada por e-mail antes de o reajuste passar a valer.</small></p>
+                </div>
+
+                <div class="col-12">
+                  <label class="form-label" for="reajuste_email_assunto">* Assunto</label>
+                  <input type="text" class="form-control" id="reajuste_email_assunto" name="faturamento[reajuste_email_assunto]" maxlength="200" value="<?php echo htmlspecialchars($fat('reajuste_email_assunto'), ENT_QUOTES, 'UTF-8'); ?>">
+                </div>
+
+                <div class="col-12">
+                  <label class="form-label" for="reajuste_email_corpo">* Corpo do e-mail</label>
+                  <textarea class="form-control" id="reajuste_email_corpo" name="faturamento[reajuste_email_corpo]" rows="10"><?php echo htmlspecialchars($fat('reajuste_email_corpo'), ENT_QUOTES, 'UTF-8'); ?></textarea>
+                  <small class="text-muted">Texto simples: as quebras de linha são preservadas no e-mail. Abaixo do texto, o sistema acrescenta automaticamente um quadro com índice, percentual, valores e a data.</small>
+                </div>
+
+
+
+                <div class="alert-message">
+                  <h4 class="alert-heading">Marcadores disponíveis</h4>
+                  <hr>
+                  <p class="mb-2">Escreva o marcador no texto e ele será trocado pelo dado do contrato no momento do envio.</p>
+                  <div class="row">
+                    <?php foreach ($reajuste_marcadores as $marcador => $descricao) { ?>
+                      <div class="col-md-6 mb-1">
+                        <code><?php echo htmlspecialchars($marcador, ENT_QUOTES, 'UTF-8'); ?></code>
+                        <small class="text-muted"> — <?php echo htmlspecialchars($descricao, ENT_QUOTES, 'UTF-8'); ?></small>
+                      </div>
+                    <?php } ?>
+                  </div>
+                  <p class="mb-0 mt-2"><small>Marcador digitado errado aparece literalmente no e-mail, em vez de sumir — assim o erro fica visível e pode ser corrigido.</small></p>
+                </div>
+              </div>
+
+
+              <div class="row mt-4">
+                <div class="col-md-4">
+                  <button type="submit" class="btn btn-primary w-100">
+                    <i class="mdi mdi-content-save"></i> SALVAR FATURAMENTO
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+
+          <?php
+          // Mesmo padrão do faturamento: o grupo `monitoramento` só nasce no
+          // primeiro salvamento, então o valor cai no default do model enquanto
+          // a chave não existe — senão a tela abriria vazia e "salvar" gravaria
+          // zeros por cima do que a rotina já usa.
+          $mon = function ($chave) use ($monitoramento_settings, $monitoramento_defaults) {
+            $postado = $this->input->post('monitoramento');
+            if (is_array($postado) && array_key_exists($chave, $postado)) {
+              return (string) $postado[$chave];
+            }
+            if (isset($monitoramento_settings[$chave]) && $monitoramento_settings[$chave] !== '') {
+              return (string) $monitoramento_settings[$chave];
+            }
+            return (string) $monitoramento_defaults[$chave];
+          };
+          ?>
+          <div class="tab-pane <?php if ($tabsDefault === 'tab_monitoramento') echo 'active'; ?>" id="tab_monitoramento" role="tabpanel">
+            <form method="POST" action="<?php echo base_url('parametros_gerais/post_monitoramento'); ?>" class="mt-3">
+              <div class="alert alert-info" role="alert">
+                A rotina "cron_monitorar_sites" checa, uma vez por dia, os domínios de contrato vigente cujo tipo de serviço esteja marcado como "tem site" em GESTÃO/Tipos de serviços. Ela compara os nameservers e o título da home com a checagem anterior e detecta site fora do ar, página de erro ou suspensão e certificado vencendo.
+              </div>
+
+              <div class="row g-3">
+                <div class="col-md-4">
+                  <label class="form-label" for="monitoramento_intervalo_horas">* Intervalo mínimo entre checagens (horas)</label>
+                  <input type="number" min="1" max="168" class="form-control" id="monitoramento_intervalo_horas" name="monitoramento[monitoramento_intervalo_horas]" value="<?php echo htmlspecialchars($mon('monitoramento_intervalo_horas'), ENT_QUOTES, 'UTF-8'); ?>" required>
+                  <small class="form-text text-muted">Com a rotina rodando 1x/dia, 20 horas garante que todo domínio entre em toda execução.</small>
+                </div>
+
+                <div class="col-md-4">
+                  <label class="form-label" for="monitoramento_timeout">* Tempo limite por site (segundos)</label>
+                  <input type="number" min="3" max="60" class="form-control" id="monitoramento_timeout" name="monitoramento[monitoramento_timeout]" value="<?php echo htmlspecialchars($mon('monitoramento_timeout'), ENT_QUOTES, 'UTF-8'); ?>" required>
+                  <small class="form-text text-muted">Site que passa disso já é um problema. Valores altos fazem a rodada estourar a janela por causa dos domínios sem resposta.</small>
+                </div>
+
+                <div class="col-md-4">
+                  <label class="form-label" for="monitoramento_ssl_dias_aviso">* Avisar do SSL com quantos dias</label>
+                  <input type="number" min="1" max="90" class="form-control" id="monitoramento_ssl_dias_aviso" name="monitoramento[monitoramento_ssl_dias_aviso]" value="<?php echo htmlspecialchars($mon('monitoramento_ssl_dias_aviso'), ENT_QUOTES, 'UTF-8'); ?>" required>
+                  <small class="form-text text-muted">Não use 30: o Let's Encrypt renova sozinho aos ~30 dias e a base inteira entraria em "vencendo" a cada ciclo.</small>
+                </div>
+
+                <div class="col-md-12">
+                  <label class="form-label" for="monitoramento_email_destinatarios">Destinatários do resumo diário</label>
+                  <input type="text" class="form-control" id="monitoramento_email_destinatarios" maxlength="500" name="monitoramento[monitoramento_email_destinatarios]" value="<?php echo htmlspecialchars($mon('monitoramento_email_destinatarios'), ENT_QUOTES, 'UTF-8'); ?>" placeholder="suporte@empresa.com.br, ti@empresa.com.br">
+                  <small class="form-text text-muted">
+                    Separe por vírgula. Em branco, o resumo vai para o e-mail cadastrado na empresa. Rodada sem
+                    nenhuma alteração não envia e-mail, e mudança de título da home não entra no resumo — ela fica
+                    só no painel, porque muda sozinha com promoção e plugin de SEO.
+                  </small>
+                </div>
+              </div>
+
+              <div class="row mt-4">
+                <div class="col-md-4">
+                  <button type="submit" class="btn btn-primary w-100">
+                    <i class="mdi mdi-content-save"></i> SALVAR MONITORAMENTO
                   </button>
                 </div>
               </div>

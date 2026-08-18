@@ -126,7 +126,8 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
 
 <ul class="nav nav-pills" role="tablist">
   <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab_visao_geral" role="tab">Visão geral</a></li>
-  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab_extrato" role="tab">Extrato financeiro</a></li>
+  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab_extrato" role="tab">Extrato Bom Controle</a></li>
+  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab_faturas" role="tab">Faturas</a></li>
   <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab_historicos" role="tab">Históricos</a></li>
 </ul>
 
@@ -155,7 +156,6 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
               <div class="form-group mb-3">
                 <label class="form-label">* Data de criação</label>
                 <input type="text" class="form-control" name="contract[created]" data-mask="00/00/0000" placeholder="dd/mm/aaaa" value="<?php echo !empty($result->created) ? date('d/m/Y', strtotime($result->created)) : ''; ?>" <?php echo $roDados; ?>>
-                <small class="text-muted">Mês em que o contrato entra nas entradas do dashboard.</small>
               </div>
             </div>
             <div class="col-12 col-md-3">
@@ -206,6 +206,337 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
         </form>
       </div>
     </div>
+
+    <?php
+    // ------------------------------------------------------------------
+    // Faturamento
+    // ------------------------------------------------------------------
+    $faturaAqui = ((string) $result->billing_source === 'cdwfinance');
+    $vinculadoErp = !empty($result->bomcontrole_contract_id);
+    $temReajuste = ((string) $result->adjustment_index !== 'nenhum');
+    $diaAtual = (int) $result->billing_day;
+    ?>
+    <?php if (!$encerrado) { ?>
+      <div class="card flex-fill">
+        <div class="card-body py-3">
+          <div class="row">
+            <div class="col">
+              <h5 class="card-title mb-1">
+                Faturamento
+                <?php if ($faturaAqui) { ?>
+                  <span class="badge bg-success">CDW Finance + NF Bom Controle</span>
+                <?php } else { ?>
+                  <span class="badge bg-secondary">Bom Controle</span>
+                <?php } ?>
+              </h5>
+              <p class="text-muted mb-3 lh-1"><small>Define quem gera as cobranças deste contrato e como elas são emitidas.</small></p>
+            </div>
+            <?php if ($faturaAqui) { ?>
+              <div class="col-auto text-end">
+                <button type="button" class="btn btn-outline-primary" id="btn_gerar_fatura"><i class="mdi mdi-file-plus-outline"></i> GERAR FATURA</button>
+                <button type="button" class="btn btn-outline-primary" id="btn_lancar_cobranca" data-bs-toggle="modal" data-bs-target="#modal_cobranca"><i class="mdi mdi-cart-plus"></i> LANÇAR COBRANÇA</button>
+                <?php if ($temReajuste && !empty($result->next_adjustment)) { ?>
+                  <button type="button" class="btn btn-outline-secondary" id="btn_avisar_reajuste"><i class="mdi mdi-email-outline"></i> AVISAR REAJUSTE</button>
+                <?php } ?>
+              </div>
+            <?php } ?>
+          </div>
+
+          <?php if (!$faturaAqui && $vinculadoErp) { ?>
+            <div class="alert alert-warning" role="alert">
+              <div class="alert-message">
+                <strong>Atenção:</strong> este contrato está vinculado ao contrato <strong>#<?php echo (int) $result->bomcontrole_contract_id; ?></strong> do Bom Controle, que continua emitindo as cobranças por lá.
+                Antes de passar o faturamento para o CDW Finance, <strong>encerre o contrato no painel do Bom Controle</strong> — se os dois ficarem ativos, o cliente será cobrado duas vezes pelo mesmo serviço.
+              </div>
+            </div>
+          <?php } ?>
+
+          <form method="POST" id="form_faturamento" action="<?php echo base_url('contratos/post_faturamento'); ?>">
+            <input type="hidden" name="id" value="<?php echo (int) $result->id; ?>">
+            <div class="row">
+              <div class="col-12 col-md-4">
+                <div class="form-group mb-3">
+                  <label class="form-label">* Quem fatura</label>
+                  <select class="form-control select2" name="billing[billing_source]" id="billing_source">
+                    <option value="bomcontrole" <?php if (!$faturaAqui) echo 'selected=""'; ?>>Bom Controle (ERP)</option>
+                    <option value="cdwfinance" <?php if ($faturaAqui) echo 'selected=""'; ?>>CDW Finance + NF Bom Controle</option>
+                  </select>
+                </div>
+              </div>
+              <div class="col-12 col-md-2 bloco-cdw">
+                <div class="form-group mb-3">
+                  <label class="form-label">* Dia do vencimento</label>
+                  <input type="number" class="form-control" name="billing[billing_day]" id="billing_day" min="1" max="31" value="<?php echo $diaAtual > 0 ? $diaAtual : (int) $billing_day_sugerido; ?>">
+                  <!-- <small class="form-text text-muted">Dia 31 vira o último dia nos meses curtos.</small> -->
+                </div>
+              </div>
+              <div class="col-12 col-md-2 bloco-cdw">
+                <div class="form-group mb-3">
+                  <label class="form-label">* Competência inicial</label>
+                  <input type="text" class="form-control" name="billing[next_competence]" id="next_competence" data-mask="00/00/0000" value="<?php echo !empty($result->next_competence) ? date('d/m/Y', strtotime($result->next_competence)) : date('d/m/Y', strtotime('first day of next month')); ?>">
+                  <small class="form-text text-muted">Primeiro mês a faturar aqui.</small>
+                </div>
+              </div>
+              <div class="col-12 col-md-2 bloco-cdw">
+                <div class="form-group mb-3">
+                  <label class="form-label">Parcelas</label>
+                  <input type="number" class="form-control" name="billing[installments]" id="installments" min="1" max="<?php echo (int) $max_parcelas_ciclo; ?>" value="<?php echo max(1, (int) $result->installments); ?>" <?php if ((int) $max_parcelas_ciclo <= 1) echo 'readonly'; ?>>
+                  <small class="form-text text-muted" id="hint_parcelas"></small>
+                </div>
+              </div>
+              <div class="col-12 col-md-2 bloco-cdw">
+                <div class="form-group mb-3">
+                  <label class="form-label">Emitir NF-e</label>
+                  <select class="form-control select2" name="billing[invoice_policy]" id="invoice_policy">
+                    <?php foreach ($invoice_policies as $slug => $rotulo) { ?>
+                      <option value="<?php echo $slug; ?>" <?php if ((string) $result->invoice_policy === $slug) echo 'selected=""'; ?>><?php echo $rotulo; ?></option>
+                    <?php } ?>
+                  </select>
+                  <!-- <small class="form-text text-muted">O cadastro do cliente não trazia essa informação — confirme com o financeiro.</small> -->
+                </div>
+              </div>
+
+
+              <hr>
+            <h6 class="mb-1">Reajuses</h6> 
+              <div class="col-12 col-md-2 bloco-cdw">
+                <div class="form-group mb-3">
+                  <label class="form-label">Reajuste anual</label>
+                  <select class="form-control select2" name="billing[adjustment_index]" id="adjustment_index">
+                    <?php foreach ($adjustment_indexes as $slug => $rotulo) { ?>
+                      <option value="<?php echo $slug; ?>" <?php if ((string) $result->adjustment_index === $slug) echo 'selected=""'; ?>><?php echo $rotulo; ?></option>
+                    <?php } ?>
+                  </select>
+                </div>
+              </div>
+              <div class="col-12 col-md-2 bloco-cdw bloco-reajuste">
+                <div class="form-group mb-3">
+                  <label class="form-label">* Próximo reajuste</label>
+                  <input type="text" class="form-control" name="billing[next_adjustment]" id="next_adjustment" data-mask="00/00/0000" value="<?php echo !empty($result->next_adjustment) ? date('d/m/Y', strtotime($result->next_adjustment)) : date('d/m/Y', strtotime($proximo_aniversario)); ?>">
+                  <!-- <small class="form-text text-muted">Próximo aniversário do contrato.</small> -->
+                </div>
+              </div>
+            </div>
+
+            <?php if (!$faturaAqui && $vinculadoErp) { ?>
+              <div class="form-check mb-3 bloco-cdw">
+                <input class="form-check-input" type="checkbox" name="billing[confirma_erp]" value="1" id="confirma_erp">
+                <label class="form-check-label" for="confirma_erp">
+                  Confirmo que o contrato <strong>#<?php echo (int) $result->bomcontrole_contract_id; ?></strong> já foi encerrado no Bom Controle.
+                </label>
+              </div>
+            <?php } ?>
+
+            <hr>
+            <h6 class="mb-1">Notificações ao cliente</h6>
+            <p class="text-muted mb-3">
+              <small>Para quem avisar sobre este contrato: boleto emitido, nota fiscal, aviso de reajuste.</small>
+            </p>
+
+            <div class="row">
+              <div class="col-12 col-lg-6">
+                <label class="form-label">E-mails</label>
+                <div id="repeater_emails">
+                  <?php
+                  // Ao menos uma linha para o repeater ter o que clonar — e para
+                  // o campo não parecer ausente num contrato sem configuração.
+                  $linhasEmail = !empty($notification_emails) ? $notification_emails : [['email' => '', 'type' => 'destinatario']];
+                  foreach ($linhasEmail as $i => $linha) {
+                  ?>
+                    <div class="card border mb-2 linha-email">
+                      <div class="card-body p-2">
+                        <div class="row align-items-end g-2">
+                          <div class="col-12 col-sm">
+                            <label class="form-label mb-1"><small>E-mail</small></label>
+                            <input type="email" class="form-control" name="notification[emails][<?php echo (int) $i; ?>][email]"
+                              value="<?php echo htmlspecialchars((string) $linha['email'], ENT_QUOTES, 'UTF-8'); ?>" placeholder="cliente@empresa.com.br">
+                          </div>
+                          <div class="col-9 col-sm-4">
+                            <label class="form-label mb-1"><small>Tipo</small></label>
+                            <select class="form-select" name="notification[emails][<?php echo (int) $i; ?>][type]">
+                              <?php foreach ($notification_types as $slug => $rotulo) { ?>
+                                <option value="<?php echo $slug; ?>" <?php if ((string) $linha['type'] === $slug) echo 'selected=""'; ?>><?php echo $rotulo; ?></option>
+                              <?php } ?>
+                            </select>
+                          </div>
+                          <div class="col-3 col-sm-auto">
+                            <button type="button" class="btn btn-outline-danger w-100 btn-remover-linha" title="Remover"><i class="mdi mdi-trash-can-outline"></i></button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  <?php } ?>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-primary" id="btn_add_email"><i class="mdi mdi-plus"></i> ADICIONAR E-MAIL</button>
+                <p class="text-muted mt-1 mb-3"><small>Havendo e-mails, ao menos um precisa ser <strong>Destinatário</strong>.</small></p>
+              </div>
+
+              <div class="col-12 col-lg-6">
+                <label class="form-label">WhatsApp</label>
+                <div id="repeater_whatsapps">
+                  <?php
+                  $linhasFone = !empty($notification_whatsapps) ? $notification_whatsapps : [['phone' => '']];
+                  foreach ($linhasFone as $i => $linha) {
+                  ?>
+                    <div class="card border mb-2 linha-whatsapp">
+                      <div class="card-body p-2">
+                        <div class="row align-items-end g-2">
+                          <div class="col">
+                            <label class="form-label mb-1"><small>Telefone</small></label>
+                            <input type="text" class="form-control phonemask" name="notification[whatsapps][<?php echo (int) $i; ?>][phone]"
+                              value="<?php echo htmlspecialchars((string) $linha['phone'], ENT_QUOTES, 'UTF-8'); ?>" placeholder="(45) 99999-9999">
+                          </div>
+                          <div class="col-auto">
+                            <button type="button" class="btn btn-outline-danger btn-remover-linha" title="Remover"><i class="mdi mdi-trash-can-outline"></i></button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  <?php } ?>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-primary" id="btn_add_whatsapp"><i class="mdi mdi-plus"></i> ADICIONAR WHATSAPP</button>
+                <p class="text-muted mt-1 mb-3"><small>Sem tipo: no WhatsApp cada número recebe a sua própria mensagem.</small></p>
+              </div>
+            </div>
+            <button type="submit" class="btn btn-primary"><i class="mdi mdi-content-save"></i> SALVAR FATURAMENTO</button>
+          </form>
+
+          <?php if (!empty($charges)) { ?>
+            <div class="bloco-cdw">
+              <hr>
+              <h6 class="mb-2">Cobranças avulsas</h6>
+              <p class="text-muted mb-2"><small>Vendas pontuais deste contrato. Diferente da recorrência, não se repetem e não são reajustadas.</small></p>
+              <div class="table-responsive">
+                <table class="table table-striped table-bordered table-hover">
+                  <thead>
+                    <tr>
+                      <th>Lançada em</th>
+                      <th>Descrição</th>
+                      <th class="text-end">Valor</th>
+                      <th class="text-center">Parcelas</th>
+                      <th class="text-center">Competência</th>
+                      <th class="text-center">Situação</th>
+                      <th class="text-center">Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <?php foreach ($charges as $cobranca) {
+                      $cancelada = ((string) $cobranca->status === 'cancelada');
+                    ?>
+                      <tr>
+                        <td><?php echo data($cobranca->created); ?></td>
+                        <td>
+                          <?php echo htmlspecialchars((string) $cobranca->description, ENT_QUOTES, 'UTF-8'); ?>
+                          <?php if (!empty($cobranca->comments)) { ?>
+                            <br /><small class="text-muted"><?php echo htmlspecialchars((string) $cobranca->comments, ENT_QUOTES, 'UTF-8'); ?></small>
+                          <?php } ?>
+                        </td>
+                        <td class="text-end">R$ <?php echo reais($cobranca->value); ?></td>
+                        <td class="text-center">
+                          <?php echo (int) $cobranca->installments; ?>×
+                          <br /><small class="text-muted"><?php echo (int) $cobranca->invoices_paid_count; ?>/<?php echo (int) $cobranca->invoices_count; ?> paga(s)</small>
+                        </td>
+                        <td class="text-center"><?php echo date('m/Y', strtotime($cobranca->competence)); ?></td>
+                        <td class="text-center">
+                          <span class="badge <?php echo $cancelada ? 'bg-secondary' : 'bg-success'; ?>"><?php echo $cancelada ? 'Cancelada' : 'Lançada'; ?></span>
+                        </td>
+                        <td class="text-center text-nowrap">
+                          <?php if (!$cancelada) { ?>
+                            <button type="button" class="btn btn-sm btn-outline-danger btn-cancelar-cobranca" data-id="<?php echo (int) $cobranca->id; ?>" data-descricao="<?php echo htmlspecialchars((string) $cobranca->description, ENT_QUOTES, 'UTF-8'); ?>" title="Cancelar a cobrança e as parcelas em aberto"><i class="mdi mdi-close"></i></button>
+                          <?php } else { ?>
+                            <span class="text-muted">—</span>
+                          <?php } ?>
+                        </td>
+                      </tr>
+                    <?php } ?>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          <?php } ?>
+
+          <?php
+          // Serviço do catálogo do ERP — é o item que a emissão da cobrança vai
+          // usar, e é ele que define o enquadramento fiscal da nota.
+          $servicoVinculado = !empty($result->bomcontrole_service_id);
+          ?>
+          <div class="bloco-cdw">
+            <hr>
+            <div class="row">
+              <div class="col">
+                <h6 class="mb-1">Serviço no Bom Controle</h6>
+                <?php if ($servicoVinculado) { ?>
+                  <p class="mb-0">
+                    <span class="badge bg-success">#<?php echo (int) $result->bomcontrole_service_id; ?></span>
+                    <strong><?php echo htmlspecialchars((string) $result->bomcontrole_service_name, ENT_QUOTES, 'UTF-8'); ?></strong>
+                  </p>
+                <?php } else { ?>
+                  <p class="text-muted mb-0"><small>
+                      Nenhum serviço vinculado. A emissão do boleto e da nota fiscal precisa dele — é o serviço do catálogo do ERP que define o enquadramento fiscal da NF.
+                    </small></p>
+                <?php } ?>
+              </div>
+              <div class="col-auto text-end">
+                <button type="button" class="btn btn-outline-primary" id="btn_vincular_servico_bc" <?php if (empty($bomcontrole_ativo)) echo 'disabled'; ?>>
+                  <i class="mdi mdi-link-variant"></i> <?php echo $servicoVinculado ? 'TROCAR SERVIÇO' : 'VINCULAR SERVIÇO BOM CONTROLE'; ?>
+                </button>
+                <?php if ($servicoVinculado) { ?>
+                  <button type="button" class="btn btn-outline-danger" id="btn_desvincular_servico_bc">
+                    <i class="mdi mdi-link-variant-off"></i> DESVINCULAR
+                  </button>
+                <?php } ?>
+              </div>
+            </div>
+            <?php if (empty($bomcontrole_ativo)) { ?>
+              <div class="alert alert-secondary mt-2 mb-0" role="alert">
+                <div class="alert-message">
+                  <small>A integração com o Bom Controle está desativada para esta empresa — ative-a no cadastro da empresa para buscar o catálogo de serviços.</small>
+                </div>
+              </div>
+            <?php } ?>
+          </div>
+
+          <?php if (!empty($adjustments)) { ?>
+            <hr>
+            <h6 class="mb-2">Histórico de reajustes</h6>
+            <div class="table-responsive">
+              <table class="table table-striped table-bordered table-hover">
+                <thead>
+                  <tr>
+                    <th>Aplicado em</th>
+                    <th>Índice</th>
+                    <th class="text-end">Percentual</th>
+                    <th>Janela</th>
+                    <th class="text-end">De</th>
+                    <th class="text-end">Para</th>
+                    <th class="text-center">Avisado</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <?php foreach ($adjustments as $reajuste) { ?>
+                    <tr>
+                      <td><?php echo date('d/m/Y', strtotime($reajuste->applied_at)); ?></td>
+                      <td><?php echo htmlspecialchars(mb_strtoupper((string) $reajuste->index_slug), ENT_QUOTES, 'UTF-8'); ?></td>
+                      <td class="text-end"><?php echo reais($reajuste->rate); ?>%</td>
+                      <td><small><?php echo date('m/Y', strtotime($reajuste->competence_start)); ?> a <?php echo date('m/Y', strtotime($reajuste->competence_end)); ?></small></td>
+                      <td class="text-end">R$ <?php echo reais($reajuste->value_before); ?></td>
+                      <td class="text-end">R$ <?php echo reais($reajuste->value_after); ?></td>
+                      <td class="text-center">
+                        <?php if (!empty($reajuste->notified)) { ?>
+                          <i class="mdi mdi-check-circle text-success" title="Cliente avisado"></i>
+                        <?php } else { ?>
+                          <i class="mdi mdi-alert-circle text-warning" title="Aplicado sem aviso prévio registrado"></i>
+                        <?php } ?>
+                      </td>
+                    </tr>
+                  <?php } ?>
+                </tbody>
+              </table>
+            </div>
+          <?php } ?>
+        </div>
+      </div>
+    <?php } ?>
 
     <div class="card flex-fill">
       <div class="card-body py-3">
@@ -330,7 +661,7 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
       <div class="card-body py-3">
         <div class="row align-items-center mb-2">
           <div class="col">
-            <h5 class="card-title mb-0">Extrato financeiro</h5>
+            <h5 class="card-title mb-0">Extrato Bom Controle</h5>
             <?php if (!empty($result->bomcontrole_contract_id)) { ?>
               <small class="text-muted">
                 Vinculado ao contrato Bom Controle #<?php echo (int) $result->bomcontrole_contract_id; ?>
@@ -366,6 +697,23 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
     </div>
   </div>
 
+  <div class="tab-pane fade" id="tab_faturas" role="tabpanel">
+    <div class="card flex-fill">
+      <div class="card-body py-3">
+        <div class="row align-items-center mb-2">
+          <div class="col">
+            <h5 class="card-title mb-0">Faturas</h5>
+            <small class="text-muted">Geradas pelo CDW Finance para este contrato.</small>
+          </div>
+          <div class="col-auto">
+            <button type="button" class="btn btn-outline-primary btn-sm" id="btn_atualizar_faturas"><i class="mdi mdi-refresh"></i> ATUALIZAR</button>
+          </div>
+        </div>
+        <div id="faturas_conteudo"></div>
+      </div>
+    </div>
+  </div>
+
   <div class="tab-pane fade" id="tab_historicos" role="tabpanel">
     <div class="card flex-fill">
       <div class="card-body py-3">
@@ -378,6 +726,87 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
     </div>
   </div>
 </div>
+
+<!-- modal cobranca avulsa -->
+<div class="modal fade" id="modal_cobranca" aria-hidden="true" style="display: none;">
+  <div class="modal-dialog modal-md" role="document">
+    <div class="modal-content">
+      <form name="form" method="POST" id="form_cobranca" action="<?php echo base_url('contratos/post_lancarcobranca'); ?>">
+        <input type="hidden" name="id" value="<?php echo (int) $result->id; ?>">
+        <div class="modal-header">
+          <h5 class="modal-title">LANÇAR COBRANÇA AVULSA</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+        </div>
+        <div class="modal-body m-3">
+          <p class="text-muted">
+            <small>Venda pontual dentro deste contrato — um serviço extra, uma migração, um desenvolvimento.
+              As parcelas são geradas na hora, com o vencimento de cada mês, e <strong>não se repetem no ciclo seguinte</strong>.</small>
+          </p>
+
+          <div class="form-group mb-3">
+            <label class="form-label">* Descrição</label>
+            <input type="text" class="form-control" name="charge[description]" id="cobranca_description" maxlength="255" placeholder="Ex.: Desenvolvimento do serviço X">
+            <small class="form-text text-muted">É o texto que aparece em cada parcela na tela de Faturas.</small>
+          </div>
+
+          <div class="row">
+            <div class="col-12 col-md-6">
+              <div class="form-group mb-3">
+                <label class="form-label">* Valor total</label>
+                <input type="text" class="form-control moneymask" name="charge[value]" id="cobranca_value" value="0,00">
+              </div>
+            </div>
+            <div class="col-12 col-md-6">
+              <div class="form-group mb-3">
+                <label class="form-label">* Parcelas</label>
+                <input type="number" class="form-control" name="charge[installments]" id="cobranca_installments" min="1" max="<?php echo (int) $max_parcelas_avulsa; ?>" value="1">
+              </div>
+            </div>
+          </div>
+
+          <div class="alert alert-secondary py-2" role="alert">
+            <div class="alert-message"><small id="cobranca_resumo">Informe o valor e o número de parcelas.</small></div>
+          </div>
+
+          <div class="row">
+            <div class="col-12 col-md-6">
+              <div class="form-group mb-3">
+                <label class="form-label">* Primeiro vencimento</label>
+                <input type="text" class="form-control" name="charge[due_date]" id="cobranca_due_date" data-mask="00/00/0000" value="<?php echo date('d/m/Y', strtotime('+30 days')); ?>">
+                <small class="form-text text-muted">As demais vencem no mesmo dia dos meses seguintes.</small>
+              </div>
+            </div>
+            <div class="col-12 col-md-6">
+              <div class="form-group mb-3">
+                <label class="form-label">Emitir NF-e</label>
+                <select class="form-control" name="charge[invoice_policy]" id="cobranca_invoice_policy">
+                  <?php foreach ($invoice_policies as $slug => $rotulo) { ?>
+                    <option value="<?php echo $slug; ?>" <?php if ((string) $result->invoice_policy === $slug) echo 'selected=""'; ?>><?php echo $rotulo; ?></option>
+                  <?php } ?>
+                </select>
+                <small class="form-text text-muted">Herdada do contrato.</small>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-group mb-0">
+            <label class="form-label">Observações</label>
+            <textarea class="form-control" name="charge[comments]" rows="2"></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">CANCELAR</button>
+          <button type="submit" class="btn btn-primary"><i class="mdi mdi-content-save"></i> LANÇAR</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<form method="POST" id="form_cancelar_cobranca" action="<?php echo base_url('contratos/post_cancelarcobranca'); ?>">
+  <input type="hidden" name="id" value="<?php echo (int) $result->id; ?>">
+  <input type="hidden" name="id_charge" id="cancelar_cobranca_id" value="">
+</form>
 
 <!-- modal dominio -->
 <div class="modal fade" id="modal_dominio" aria-hidden="true" style="display: none;">
@@ -482,7 +911,7 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
   <div class="modal fade" id="modal_encerrar" aria-hidden="true" style="display: none;">
     <div class="modal-dialog modal-md" role="document">
       <div class="modal-content">
-        <form name="form" method="POST" action="<?php echo base_url('contratos/post_encerrar'); ?>">
+        <form name="form" id="form_encerrar" method="POST" action="<?php echo base_url('contratos/post_encerrar'); ?>">
           <input type="hidden" name="id" value="<?php echo (int) $result->id; ?>">
           <div class="modal-header">
             <h5 class="modal-title">ENCERRAR CONTRATO</h5>
@@ -497,18 +926,39 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
                 <br><small>Suspensão não faz isso — use SUSPENDER quando a parada for temporária.</small>
               </div>
             </div>
+            <?php if ((int) $dominios_com_vinculo > 0) { ?>
+              <div class="alert alert-danger" role="alert">
+                <div class="alert-message">
+                  <i class="mdi mdi-server-off"></i>
+                  <strong><?php echo (int) $dominios_com_vinculo; ?> domínio(s) vinculado(s)</strong> terão a conta
+                  <strong>suspensa nos painéis</strong> (WHM/DirectAdmin suspendem a conta inteira; CloudPanel, o site) e,
+                  em seguida, serão <strong>desvinculados</strong> — a conta fica órfã, sem contrato.
+                  <br><small>
+                    Reabrir o contrato depois <strong>não</strong> reativa as contas nem refaz o vínculo. Conta
+                    compartilhada com outro contrato vigente não é suspensa, e o que falhar fica listado na tela.
+                  </small>
+                </div>
+              </div>
+            <?php } ?>
             <div class="form-group mb-3">
               <label class="form-label">* Motivo do encerramento</label>
+              <?php // Só os ativos: o catálogo é gerido em GESTÃO › Motivos de cancelamento. 
+              ?>
               <select class="form-control" name="reason" required>
                 <option value="">Selecione...</option>
-                <?php foreach ($end_reasons as $slug => $rotulo) { ?>
-                  <option value="<?php echo $slug; ?>"><?php echo $rotulo; ?></option>
+                <?php foreach ($end_reasons_ativos as $slug => $rotulo) { ?>
+                  <option value="<?php echo $slug; ?>"><?php echo htmlspecialchars($rotulo, ENT_QUOTES, 'UTF-8'); ?></option>
                 <?php } ?>
               </select>
             </div>
             <div class="form-group mb-3">
-              <label class="form-label">Observações</label>
-              <textarea class="form-control" name="comments" rows="3" maxlength="500" placeholder="Detalhe do encerramento (opcional)."></textarea>
+              <label class="form-label d-flex justify-content-between">
+                <span>Observações</span>
+                <?php // O maxlength trava a digitação sem dizer por quê; o contador mostra o teto antes de o usuário esbarrar nele. 
+                ?>
+                <small class="text-muted"><span id="encerrar_contador">0</span>/300</small>
+              </label>
+              <textarea class="form-control" name="comments" id="encerrar_comments" rows="3" maxlength="300" placeholder="Detalhe do encerramento (opcional)."></textarea>
             </div>
           </div>
           <div class="modal-footer">
@@ -566,6 +1016,55 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
 </div>
 <!-- modal vinculo bom controle -->
 
+<!-- modal do catalogo de servicos: a busca é sob demanda porque o rate limit do
+     ERP não tolera varrer os 119 serviços a cada abertura -->
+<div class="modal fade" id="modal_servico_bc" aria-hidden="true" style="display: none;">
+  <div class="modal-dialog modal-lg" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">SERVIÇO DO BOM CONTROLE</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body m-1" style="min-height:0;">
+        <p class="text-muted">
+          <small>Este é o serviço que a cobrança vai usar no ERP. O <strong>tipo</strong> ao lado de cada um é o código fiscal do serviço — é ele que determina a tributação da nota.</small>
+        </p>
+
+        <div class="input-group mb-3">
+          <input type="text" class="form-control" id="servico_bc_termo" placeholder="Buscar no catálogo (ex.: site, hospedagem, suporte)">
+          <button class="btn btn-primary" type="button" id="btn_buscar_servico_bc"><i class="mdi mdi-magnify"></i> BUSCAR</button>
+        </div>
+
+        <div id="servico_bc_aviso"></div>
+
+        <div class="table-responsive" style="max-height: 360px; overflow-y: auto;">
+          <table class="table table-sm table-striped table-hover mb-0">
+            <thead>
+              <tr>
+                <th style="width: 40px;"></th>
+                <th style="width: 70px;">Id</th>
+                <th>Serviço</th>
+                <th>Tipo (código fiscal)</th>
+              </tr>
+            </thead>
+            <tbody id="servico_bc_lista"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div class="col">
+          <button type="button" class="btn w-100 btn-primary" id="btn_confirmar_servico_bc" disabled><i class="mdi mdi-link-variant"></i> VINCULAR</button>
+        </div>
+        <div class="col"></div>
+        <div class="col">
+          <button type="button" class="btn w-100 btn-outline-secondary" data-bs-dismiss="modal"><i class="fa fa-times"></i> FECHAR</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- modal catalogo de servicos -->
+
 <script>
   document.addEventListener("DOMContentLoaded", function() {
     function notificar(tipo, mensagem) {
@@ -608,11 +1107,20 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
       allowZero: true
     });
 
+    // A confirmação diz quantas CONTAS a ação derruba (ou devolve), porque o
+    // efeito não é só o status: no WHM e no DirectAdmin a suspensão é da conta
+    // inteira, e ela sai do ar assim que o botão é confirmado.
     $('#btn_status').on('click', function() {
       var suspender = $(this).data('acao') === 'suspender';
+      var vinculados = <?php echo (int) $dominios_com_vinculo; ?>;
+      var contas = vinculados > 0 ?
+        '<br>' + vinculados + ' domínio(s) vinculado(s) ' + (suspender ? 'serão suspensos' : 'serão reativados') +
+        ' nos painéis dos servidores.' :
+        '<br><small class="text-muted">Nenhum domínio vinculado a servidor — nada muda nos painéis.</small>';
+
       Swal.fire({
         title: suspender ? 'Suspender contrato?' : 'Reativar contrato?',
-        html: suspender ? 'O contrato ficará com o status <strong>suspenso</strong>.' : 'O contrato voltará ao status <strong>vigente</strong>.',
+        html: (suspender ? 'O contrato ficará com o status <strong>suspenso</strong>.' : 'O contrato voltará ao status <strong>vigente</strong>.') + contas,
         icon: 'question',
         showCancelButton: true,
         confirmButtonColor: suspender ? '#d33' : '#3085d6',
@@ -620,8 +1128,24 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
         cancelButtonText: 'Cancelar',
         confirmButtonText: suspender ? 'Suspender' : 'Reativar'
       }).then(function(result) {
-        if (result.value) $('#form_status').submit();
+        if (result.value) {
+          $('#btn_status').prop('disabled', true).html('<span class="spinner-border spinner-border-sm align-middle me-1"></span> APLICANDO...');
+          $('#form_status').submit();
+        }
       });
+    });
+
+    // O encerramento fala com os painéis antes de gravar: sem o aviso, um
+    // contrato com várias contas pareceria travado e convidaria ao segundo
+    // clique.
+    $('#encerrar_comments').on('input', function() {
+      $('#encerrar_contador').text($(this).val().length);
+    });
+
+    $('#form_encerrar').on('submit', function() {
+      $(this).find('button[type="submit"]')
+        .prop('disabled', true)
+        .html('<span class="spinner-border spinner-border-sm align-middle me-1"></span> ENCERRANDO...');
     });
 
     // Reabrir é CORREÇÃO de engano, não retorno de cliente (cliente que volta
@@ -630,6 +1154,7 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
       Swal.fire({
         title: 'Reabrir contrato?',
         html: 'O contrato volta a <strong>vigente</strong> e o registro do encerramento é apagado.<br>' +
+          '<strong>As contas suspensas no encerramento não são reativadas</strong> — o vínculo com o servidor foi desfeito.<br>' +
           'Ele sai da barra de saídas de <strong><?php echo $encerrado ? date('m/Y', strtotime($result->ended)) : ''; ?></strong> no Dashboard.',
         icon: 'question',
         showCancelButton: true,
@@ -986,7 +1511,7 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
     });
 
     // ------------------------------------------------------------------
-    // Extrato financeiro (Bom Controle)
+    // Extrato Bom Controle
     // ------------------------------------------------------------------
     var bcVinculado = <?php echo !empty($result->bomcontrole_contract_id) ? 'true' : 'false'; ?>;
     var bcAtivo = <?php echo !empty($bomcontrole_ativo) ? 'true' : 'false'; ?>;
@@ -1111,6 +1636,173 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
 
     $('#btn_atualizar_extrato').on('click', function() {
       carregarExtrato(true);
+    });
+
+    // ------------------------------------------------------------------
+    // Faturas do CDW Finance — paginadas no servidor
+    // ------------------------------------------------------------------
+    // Reusa esc/dataBr/moedaBr do bloco acima; a página corrente vive aqui e
+    // não na URL, porque a aba é um pedaço da tela do contrato — recarregar
+    // por querystring perderia a aba aberta.
+    var faturasPagina = 1;
+    var faturasCarregado = false;
+    var faturasCarregando = false;
+
+    var badgeSituacao = {
+      paga: 'bg-success',
+      vencida: 'bg-danger',
+      a_vencer: 'bg-primary',
+      cancelada: 'bg-secondary'
+    };
+
+    function linhaFatura(item, rotulos) {
+      var sit = String(item.situation || '');
+      var badge = badgeSituacao[sit] || 'bg-secondary';
+      var rotulo = rotulos[sit] || sit;
+      var competencia = String(item.competence || '').split('-');
+      competencia = competencia.length === 3 ? competencia[1] + '/' + competencia[0] : '—';
+
+      return '<tr>' +
+        '<td class="text-center">' + competencia + '</td>' +
+        '<td class="text-center">' + parcelaRotulo(item) + '</td>' +
+        '<td class="text-center">' + dataBr(item.due_date) + '</td>' +
+        '<td class="text-end">' + moedaBr(item.value) + '</td>' +
+        '<td class="text-center"><span class="badge ' + badge + '">' + esc(rotulo) + '</span></td>' +
+        '<td><small>' + esc(item.description) + origemRotulo(item) + '</small></td>' +
+        '</tr>';
+    }
+
+    // Sem a parcela, duas linhas de R$ 250 no mesmo mês ficam indistinguíveis.
+    // "1/1" vira travessão: repetir isso em toda linha de contrato mensal é
+    // ruído que esconde as poucas linhas que de fato são parceladas.
+    function parcelaRotulo(item) {
+      var total = parseInt(item.installments_total, 10) || 1;
+      if (total <= 1) return '<span class="text-muted">—</span>';
+      return esc(item.installment_number) + '/' + esc(total);
+    }
+
+    // A avulsa não tem competência que a distinga da recorrência — as duas
+    // caem no mesmo mês. O marcador é o que diz de onde a linha veio.
+    function origemRotulo(item) {
+      if (!item.id_charge || parseInt(item.id_charge, 10) === 0) return '';
+      return ' <span class="badge bg-light text-dark border">avulsa</span>';
+    }
+
+    function renderFaturas(data) {
+      var $saida = $('#faturas_conteudo');
+      var rotulos = data.situations || {};
+
+      if (!data.total) {
+        var dica = data.fatura_aqui ?
+          'Nenhuma fatura gerada ainda. Use GERAR FATURA no bloco Faturamento ou espere a rotina diária.' :
+          'Este contrato é cobrado pelo Bom Controle. Passe o faturamento para o CDW Finance no bloco Faturamento para gerar faturas aqui.';
+
+        $saida.html('<div class="text-center text-muted py-5">' +
+          '<i class="mdi mdi-receipt-text-outline fs-1 d-block mb-2"></i>' +
+          '<h5 class="mb-1">Nenhuma fatura</h5>' +
+          '<p class="mb-0">' + dica + '</p></div>');
+        return;
+      }
+
+      var html = '<div class="table-responsive"><table class="table table-sm table-striped table-bordered table-hover mb-2">' +
+        '<thead><tr>' +
+        '<th class="text-center">Competência</th>' +
+        '<th class="text-center">Parcela</th>' +
+        '<th class="text-center">Vencimento</th>' +
+        '<th class="text-end">Valor</th>' +
+        '<th class="text-center">Situação</th>' +
+        '<th>Descrição</th>' +
+        '</tr></thead><tbody>';
+
+      $.each(data.itens || [], function(i, item) {
+        html += linhaFatura(item, rotulos);
+      });
+
+      html += '</tbody></table></div>';
+      html += rodapeFaturas(data);
+
+      $saida.html(html);
+    }
+
+    // Anterior/Próxima em vez de páginas numeradas: a ordem é do vencimento
+    // mais recente para o mais antigo, então o que interessa está sempre no
+    // começo — e o total fica escrito, para a lista não parecer truncada.
+    function rodapeFaturas(data) {
+      var resumo = '<span class="text-muted">' + data.total + ' fatura(s) · ' +
+        moedaBr(data.valor_total) + ' no total';
+
+      if (data.valor_aberto > 0) {
+        resumo += ' · <strong>' + moedaBr(data.valor_aberto) + ' em aberto</strong>';
+      }
+      if (data.valor_vencido > 0) {
+        resumo += ' · <span class="text-danger">' + moedaBr(data.valor_vencido) + ' vencido</span>';
+      }
+      resumo += '</span>';
+
+      var nav = '';
+      if (data.paginas > 1) {
+        nav = '<div class="btn-group btn-group-sm" role="group">' +
+          '<button type="button" class="btn btn-outline-secondary btn-faturas-pag" data-pagina="' + (data.pagina - 1) + '"' +
+          (data.pagina <= 1 ? ' disabled' : '') + '><i class="mdi mdi-chevron-left"></i> ANTERIOR</button>' +
+          '<button type="button" class="btn btn-outline-secondary" disabled>' + data.pagina + ' / ' + data.paginas + '</button>' +
+          '<button type="button" class="btn btn-outline-secondary btn-faturas-pag" data-pagina="' + (data.pagina + 1) + '"' +
+          (data.pagina >= data.paginas ? ' disabled' : '') + '>PRÓXIMA <i class="mdi mdi-chevron-right"></i></button>' +
+          '</div>';
+      }
+
+      return '<div class="row align-items-center"><div class="col"><small>' + resumo + '</small></div>' +
+        '<div class="col-auto">' + nav + '</div></div>';
+    }
+
+    function carregarFaturas(pagina) {
+      // Sem guarda, clicar PRÓXIMA duas vezes rápido deixaria a resposta mais
+      // lenta chegar por último e a tela mostraria a página errada.
+      if (faturasCarregando) return;
+      faturasCarregando = true;
+
+      var $saida = $('#faturas_conteudo');
+      $saida.html('<div class="text-center py-4"><div class="spinner-border text-primary" role="status"></div></div>');
+
+      $.ajax({
+        url: '<?php echo base_url('contratos/json_postfaturas'); ?>',
+        type: 'POST',
+        dataType: 'json',
+        data: {
+          id: <?php echo (int) $result->id; ?>,
+          pagina: pagina
+        },
+        success: function(data) {
+          if (!data || !data.success) {
+            $saida.html($('<div class="alert alert-danger mb-0"><div class="alert-message"></div></div>')
+              .find('.alert-message').text((data && data.message) ? data.message : 'Erro ao consultar as faturas.').end());
+            faturasCarregado = false; // deixa tentar de novo
+            return;
+          }
+          faturasPagina = data.data.pagina;
+          faturasCarregado = true;
+          renderFaturas(data.data);
+        },
+        error: function() {
+          $saida.html('<div class="alert alert-danger mb-0"><div class="alert-message">Erro de comunicação ao consultar as faturas.</div></div>');
+          faturasCarregado = false;
+        },
+        complete: function() {
+          faturasCarregando = false;
+        }
+      });
+    }
+
+    $('a[href="#tab_faturas"]').on('shown.bs.tab', function() {
+      if (!faturasCarregado) carregarFaturas(faturasPagina);
+    });
+
+    $('#btn_atualizar_faturas').on('click', function() {
+      carregarFaturas(faturasPagina);
+    });
+
+    // Delegado: os botões são recriados a cada render.
+    $('#faturas_conteudo').on('click', '.btn-faturas-pag', function() {
+      carregarFaturas(parseInt($(this).data('pagina'), 10) || 1);
     });
 
     // --- vínculo ---
@@ -1248,6 +1940,426 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
           error: function(xhr) {
             console.log(xhr.responseText);
             notificar('error', 'Erro ao desvincular.');
+          }
+        });
+      });
+    });
+
+    // ----------------------------------------------------------------
+    // Faturamento
+    // ----------------------------------------------------------------
+
+    // Os campos só fazem sentido quando o faturamento é daqui; escondê-los
+    // evita que alguém preencha um dia de vencimento que o ERP ignora.
+    function alternarBlocosFaturamento() {
+      var daqui = $('#billing_source').val() === 'cdwfinance';
+      $('.bloco-cdw').toggle(daqui);
+      if (daqui) alternarBlocoReajuste();
+    }
+
+    function alternarBlocoReajuste() {
+      var temIndice = $('#adjustment_index').val() !== 'nenhum';
+      $('.bloco-reajuste').toggle(temIndice);
+    }
+
+    if ($('#billing_source').length) {
+      alternarBlocosFaturamento();
+      $('#billing_source').on('change', alternarBlocosFaturamento);
+      $('#adjustment_index').on('change', alternarBlocoReajuste);
+    }
+
+    // ------------------------------------------------------------------
+    // Notificações ao cliente — repeaters de e-mail e WhatsApp
+    // ------------------------------------------------------------------
+    // Clonar a última linha em vez de montar o HTML em string: o markup vive
+    // num lugar só (o PHP), então mudar um campo não exige mexer aqui também.
+    // O índice do `name` é reescrito no clone, senão duas linhas dividiriam a
+    // mesma posição do array e o PHP receberia só a última.
+    function reindexar($container, grupo) {
+      $container.children().each(function(i) {
+        $(this).find('[name]').each(function() {
+          var nome = $(this).attr('name').replace(
+            new RegExp('^notification\\[' + grupo + '\\]\\[\\d+\\]'),
+            'notification[' + grupo + '][' + i + ']'
+          );
+          $(this).attr('name', nome);
+        });
+      });
+    }
+
+    function adicionarLinha(seletor, grupo) {
+      var $container = $(seletor);
+      var $ultima = $container.children().last();
+      if (!$ultima.length) return;
+
+      var $nova = $ultima.clone();
+      $nova.find('input').val('');
+      // O select volta ao primeiro tipo: herdar "Cópia Oculta" da linha
+      // anterior faria a nova nascer escondida do cliente sem ninguém pedir.
+      $nova.find('select').prop('selectedIndex', 0);
+      $container.append($nova);
+
+      reindexar($container, grupo);
+
+      // O `.phonemask` do footer roda uma vez, no ready: a linha clonada
+      // nasce sem máscara. E o clone é sem `true` de propósito — copiar
+      // dados e eventos traria junto o estado velho do plugin.
+      if (typeof $.fn.mask === 'function') {
+        $nova.find('.phonemask').each(function() {
+          var padrao = function(val) {
+            return val.replace(/\D/g, '').length === 11 ? '(00) 00000-0000' : '(00) 0000-00009';
+          };
+          $(this).mask(padrao, {
+            onKeyPress: function(val, e, field, options) {
+              field.mask(padrao.apply({}, arguments), options);
+            }
+          });
+        });
+      }
+
+      $nova.find('input').first().focus();
+    }
+
+    $('#btn_add_email').on('click', function() {
+      adicionarLinha('#repeater_emails', 'emails');
+    });
+
+    $('#btn_add_whatsapp').on('click', function() {
+      adicionarLinha('#repeater_whatsapps', 'whatsapps');
+    });
+
+    // Delegado: as linhas são clonadas depois do carregamento.
+    $('#repeater_emails, #repeater_whatsapps').on('click', '.btn-remover-linha', function() {
+      var $container = $(this).closest('#repeater_emails, #repeater_whatsapps');
+      var grupo = $container.attr('id') === 'repeater_emails' ? 'emails' : 'whatsapps';
+
+      // A última linha é esvaziada, não removida: sem nenhuma linha o repeater
+      // fica sem o que clonar e o botão ADICIONAR para de funcionar.
+      if ($container.children().length <= 1) {
+        $container.find('input').val('');
+        $container.find('select').prop('selectedIndex', 0);
+        return;
+      }
+
+      $(this).closest('.linha-email, .linha-whatsapp').remove();
+      reindexar($container, grupo);
+    });
+
+    // ------------------------------------------------------------------
+    // Parcelamento
+    // ------------------------------------------------------------------
+    // O hint traduz "2 parcelas" em "2× de R$ 250,00": o valor por parcela é
+    // o que o cliente vê no boleto, e é ele que se confere de cabeça.
+    function moedaSimples(valor) {
+      return Number(valor || 0).toLocaleString('pt-BR', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      });
+    }
+
+    // Mesmo rateio do servidor (Invoice_model::valoresDasParcelas): centavos
+    // inteiros, resto na última. Se as duas contas divergirem, a tela promete
+    // um valor e o boleto cobra outro.
+    function parcelasDe(valorReais, n) {
+      var centavos = Math.round((Number(valorReais) || 0) * 100);
+      n = Math.max(1, parseInt(n, 10) || 1);
+      if (n === 1) return {
+        base: centavos / 100,
+        ultima: centavos / 100,
+        iguais: true
+      };
+
+      var base = Math.floor(centavos / n);
+      var ultima = base + (centavos - base * n);
+      return {
+        base: base / 100,
+        ultima: ultima / 100,
+        iguais: base === ultima
+      };
+    }
+
+    function atualizarHintParcelas() {
+      var n = parseInt($('#installments').val(), 10) || 1;
+      var valor = Number('<?php echo (float) $result->value; ?>');
+      var p = parcelasDe(valor, n);
+
+      $('#hint_parcelas').text(n <= 1 ?
+        'Uma cobrança por competência.' :
+        n + '× de R$ ' + moedaSimples(p.base) + (p.iguais ? '' : ' (última: R$ ' + moedaSimples(p.ultima) + ')'));
+    }
+
+    if ($('#installments').length) {
+      atualizarHintParcelas();
+      $('#installments').on('input change', atualizarHintParcelas);
+    }
+
+    $('#cobranca_value, #cobranca_installments').on('input change', function() {
+      var n = parseInt($('#cobranca_installments').val(), 10) || 1;
+      var valor = Number(String($('#cobranca_value').val() || '0').replace(/\./g, '').replace(',', '.'));
+      var p = parcelasDe(valor, n);
+
+      $('#cobranca_resumo').html(valor <= 0 ?
+        'Informe o valor e o número de parcelas.' :
+        '<strong>' + n + '× de R$ ' + moedaSimples(p.base) + '</strong>' +
+        (p.iguais ? '' : ' — a última fica em R$ ' + moedaSimples(p.ultima) + ', para a soma fechar em R$ ' + moedaSimples(valor)));
+    });
+
+    $('.btn-cancelar-cobranca').on('click', function() {
+      var id = $(this).data('id');
+      var descricao = $(this).data('descricao');
+
+      Swal.fire({
+        title: 'Cancelar a cobrança?',
+        html: '<strong>' + $('<span></span>').text(descricao).html() + '</strong><br>' +
+          'As parcelas ainda em aberto são canceladas. As já pagas permanecem — o dinheiro entrou.',
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'SIM, CANCELAR',
+        cancelButtonText: 'VOLTAR'
+      }).then(function(r) {
+        if (!r.isConfirmed) return;
+        $('#cancelar_cobranca_id').val(id);
+        $('#form_cancelar_cobranca').submit();
+      });
+    });
+
+    $('#form_faturamento').on('submit', function(e) {
+      if ($('#billing_source').val() !== 'cdwfinance') return;
+
+      var $confirma = $('#confirma_erp');
+      if ($confirma.length && !$confirma.is(':checked')) {
+        e.preventDefault();
+        Swal.fire('Atenção', 'Encerre o contrato no Bom Controle e marque a confirmação — sem isso o cliente seria cobrado duas vezes.', 'warning');
+      }
+    });
+
+    $('#btn_gerar_fatura').on('click', function() {
+      var $btn = $(this);
+      var html = $btn.html();
+      $btn.prop('disabled', true).html('<span class="spinner-border spinner-border-sm me-1" role="status"></span> GERANDO...');
+
+      $.ajax({
+        type: 'POST',
+        url: '<?php echo base_url('contratos/json_postgerarfatura'); ?>',
+        data: {
+          id: <?php echo (int) $result->id; ?>
+        },
+        dataType: 'json',
+        success: function(data) {
+          if (sessaoExpirou(data)) return;
+          if (!data || !data.return) {
+            notificar('error', (data && data.message) ? data.message : 'Erro ao gerar a fatura.');
+            return;
+          }
+          notificar('success', data.message);
+          if (data.data && data.data.geradas > 0) window.location.reload();
+        },
+        error: function(xhr) {
+          console.log(xhr.responseText);
+          notificar('error', 'Erro de comunicação ao gerar a fatura.');
+        },
+        complete: function() {
+          $btn.prop('disabled', false).html(html);
+        }
+      });
+    });
+
+    // ----------------------------------------------------------------
+    // Serviço do catálogo do Bom Controle
+    // ----------------------------------------------------------------
+
+    var servicoSelecionado = null;
+
+    function buscarServicoBc(termo) {
+      var $lista = $('#servico_bc_lista');
+      var $aviso = $('#servico_bc_aviso');
+
+      servicoSelecionado = null;
+      $('#btn_confirmar_servico_bc').prop('disabled', true);
+      $aviso.html('');
+      $lista.html('<tr><td colspan="4" class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm me-2" role="status"></div>Consultando o catálogo...</td></tr>');
+
+      $.ajax({
+        type: 'POST',
+        url: '<?php echo base_url('contratos/json_postbuscarservicobc'); ?>',
+        data: {
+          id: <?php echo (int) $result->id; ?>,
+          termo: termo
+        },
+        dataType: 'json',
+        success: function(data) {
+          if (sessaoExpirou(data)) return;
+
+          if (!data || !data.return || !data.data) {
+            $lista.html('');
+            $aviso.html($('<div class="alert alert-danger mb-2"><div class="alert-message"></div></div>')
+              .find('.alert-message').text((data && data.message) ? data.message : 'Erro ao consultar o catálogo.').end());
+            return;
+          }
+
+          var servicos = data.data.servicos || [];
+          if (!servicos.length) {
+            $lista.html('<tr><td colspan="4" class="text-center text-muted py-4">Nenhum serviço encontrado para esta busca.</td></tr>');
+            return;
+          }
+
+          // Quando a busca é vazia, o catálogo pode ser maior que a página —
+          // dizer isso evita que alguém conclua que o serviço não existe.
+          if (data.data.total > data.data.exibindo) {
+            $aviso.html($('<div class="alert alert-warning mb-2"><div class="alert-message"></div></div>')
+              .find('.alert-message').text('Mostrando ' + data.data.exibindo + ' de ' + data.data.total + ' serviços. Refine a busca para encontrar o que falta.').end());
+          }
+
+          var html = '';
+          $.each(servicos, function(i, s) {
+            html += '<tr>' +
+              '<td class="text-center"><input type="radio" name="servico_bc" class="form-check-input servico-bc-radio"' +
+              ' data-id="' + s.id + '" data-nome="' + esc(s.nome) + '"></td>' +
+              '<td>' + s.id + '</td>' +
+              '<td>' + esc(s.nome) + (s.observacao ? '<br /><small class="text-muted">' + esc(s.observacao) + '</small>' : '') + '</td>' +
+              '<td><small class="text-muted">' + esc(s.tipo) + '</small></td>' +
+              '</tr>';
+          });
+          $lista.html(html);
+        },
+        error: function(xhr) {
+          console.log(xhr.responseText);
+          $lista.html('');
+          $aviso.html('<div class="alert alert-danger mb-2"><div class="alert-message">Erro de comunicação ao consultar o catálogo.</div></div>');
+        }
+      });
+    }
+
+    $('#btn_vincular_servico_bc').on('click', function() {
+      $('#servico_bc_termo').val('');
+      $('#modal_servico_bc').modal('show');
+      buscarServicoBc('');
+    });
+
+    $('#btn_buscar_servico_bc').on('click', function() {
+      buscarServicoBc($('#servico_bc_termo').val());
+    });
+
+    $('#servico_bc_termo').on('keypress', function(e) {
+      if (e.which === 13) {
+        e.preventDefault();
+        buscarServicoBc($(this).val());
+      }
+    });
+
+    $(document).on('change', '.servico-bc-radio', function() {
+      servicoSelecionado = {
+        id: $(this).data('id'),
+        nome: $(this).data('nome')
+      };
+      $('#btn_confirmar_servico_bc').prop('disabled', false);
+    });
+
+    $('#btn_confirmar_servico_bc').on('click', function() {
+      if (!servicoSelecionado) return;
+
+      var $btn = $(this);
+      $btn.prop('disabled', true).html('<span class="spinner-border spinner-border-sm me-1" role="status"></span> VINCULANDO...');
+
+      $.ajax({
+        type: 'POST',
+        url: '<?php echo base_url('contratos/json_postvincularservicobc'); ?>',
+        data: {
+          id: <?php echo (int) $result->id; ?>,
+          id_servico: servicoSelecionado.id
+        },
+        dataType: 'json',
+        success: function(data) {
+          if (sessaoExpirou(data)) return;
+          if (!data || !data.return) {
+            notificar('error', (data && data.message) ? data.message : 'Erro ao vincular o serviço.');
+            $btn.prop('disabled', false).html('<i class="mdi mdi-link-variant"></i> VINCULAR');
+            return;
+          }
+          notificar('success', data.message);
+          window.location.reload();
+        },
+        error: function(xhr) {
+          console.log(xhr.responseText);
+          notificar('error', 'Erro de comunicação ao vincular o serviço.');
+          $btn.prop('disabled', false).html('<i class="mdi mdi-link-variant"></i> VINCULAR');
+        }
+      });
+    });
+
+    $('#btn_desvincular_servico_bc').on('click', function() {
+      Swal.fire({
+        title: 'Desvincular o serviço?',
+        html: 'O contrato fica sem serviço do ERP, e a emissão de boleto e nota fiscal passa a não ter o que enviar. Nada muda no catálogo do Bom Controle.',
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonColor: '#d33',
+        cancelButtonText: 'Cancelar',
+        confirmButtonText: 'Desvincular'
+      }).then(function(result) {
+        if (!result.value) return;
+
+        $.ajax({
+          type: 'POST',
+          url: '<?php echo base_url('contratos/json_postdesvincularservicobc'); ?>',
+          data: {
+            id: <?php echo (int) $result->id; ?>
+          },
+          dataType: 'json',
+          success: function(data) {
+            if (sessaoExpirou(data)) return;
+            if (!data || !data.return) {
+              notificar('error', (data && data.message) ? data.message : 'Erro ao desvincular.');
+              return;
+            }
+            notificar('success', data.message);
+            window.location.reload();
+          },
+          error: function(xhr) {
+            console.log(xhr.responseText);
+            notificar('error', 'Erro de comunicação ao desvincular.');
+          }
+        });
+      });
+    });
+
+    $('#btn_avisar_reajuste').on('click', function() {
+      var $btn = $(this);
+
+      Swal.fire({
+        title: 'Enviar aviso de reajuste?',
+        html: 'O cliente recebe um e-mail com o índice, o percentual e o novo valor.',
+        icon: 'question',
+        showCancelButton: true,
+        cancelButtonText: 'Cancelar',
+        confirmButtonText: 'Enviar'
+      }).then(function(result) {
+        if (!result.value) return;
+
+        var html = $btn.html();
+        $btn.prop('disabled', true).html('<span class="spinner-border spinner-border-sm me-1" role="status"></span> ENVIANDO...');
+
+        $.ajax({
+          type: 'POST',
+          url: '<?php echo base_url('contratos/json_postavisarreajuste'); ?>',
+          data: {
+            id: <?php echo (int) $result->id; ?>
+          },
+          dataType: 'json',
+          success: function(data) {
+            if (sessaoExpirou(data)) return;
+            if (!data || !data.return) {
+              notificar('error', (data && data.message) ? data.message : 'Erro ao enviar o aviso.');
+              return;
+            }
+            notificar('success', data.message);
+          },
+          error: function(xhr) {
+            console.log(xhr.responseText);
+            notificar('error', 'Erro de comunicação ao enviar o aviso.');
+          },
+          complete: function() {
+            $btn.prop('disabled', false).html(html);
           }
         });
       });

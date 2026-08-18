@@ -4,7 +4,7 @@ defined('BASEPATH') or exit('No direct script access allowed');
 
 /**
  * Regras da integração com o ERP Bom Controle: config por tenant, vínculo do
- * contrato, montagem do extrato financeiro e sincronização do cadastro do
+ * contrato, montagem do Extrato Bom Controle e sincronização do cadastro do
  * cliente. Os controllers só chamam este model — quem fala HTTP é a library
  * Bom_controle.
  *
@@ -40,6 +40,9 @@ class Bomcontrole_model extends CI_Model
 
     /** Teto de páginas por listagem da API (100 itens cada). */
     const MAX_PAGINAS = 5;
+
+    /** Teto de serviços do catálogo devolvidos à tela por busca. */
+    const MAX_SERVICOS = 100;
 
     /**
      * Timeout do caminho SÍNCRONO da sincronização de cadastro (wizard público
@@ -428,6 +431,204 @@ class Bomcontrole_model extends CI_Model
         ], 'id', (int) $idContract);
 
         return ['success' => TRUE, 'message' => 'Vínculo com o Bom Controle removido.', 'data' => NULL];
+    }
+
+    // ------------------------------------------------------------------
+    // Catálogo de serviços do ERP
+    //
+    // O contrato guarda o Id do serviço que a emissão vai usar em
+    // `Servicos[].IdServico`. O vínculo é por CONTRATO (e não por tipo de
+    // serviço) porque a fatura tem um valor só: com um serviço por contrato, a
+    // venda no ERP sai com um item e o valor da fatura, sem rateio inventado
+    // entre os dois ou três tipos que a maioria dos contratos tem.
+    // ------------------------------------------------------------------
+
+    /**
+     * Busca serviços no catálogo do ERP.
+     *
+     * Sob demanda, a partir do que o usuário digitou: o rate limit do Bom
+     * Controle é agressivo (uma dúzia de chamadas seguidas já devolve 429),
+     * então varrer o catálogo a cada abertura de tela não é opção.
+     *
+     * @param  int    $idCompany
+     * @param  string $termo vazio = primeira página do catálogo
+     * @return array success, message, data => ['servicos', 'total', 'exibindo']
+     */
+    public function buscarServicos($idCompany, $termo = '')
+    {
+        $config = $this->getConfig($idCompany);
+        if (!$config['success']) {
+            return ['success' => FALSE, 'message' => $config['message'], 'data' => NULL];
+        }
+
+        $suspendeu = sessao_suspender();
+
+        try {
+            $resposta = $this->client()->pesquisarServicos(
+                $config['config'],
+                trim((string) $termo),
+                self::MAX_SERVICOS,
+                1
+            );
+        } catch (Throwable $e) {
+            $this->logarErroServico($idCompany, 'pesquisar', $e->getMessage());
+            return ['success' => FALSE, 'message' => 'Falha inesperada ao consultar o catálogo do Bom Controle.', 'data' => NULL];
+        } finally {
+            sessao_retomar($suspendeu);
+        }
+
+        if (!$resposta['success']) {
+            $this->logarErroServico($idCompany, 'pesquisar', $resposta['message']);
+            return ['success' => FALSE, 'message' => $resposta['message'], 'data' => NULL];
+        }
+
+        $servicos = [];
+        foreach ((array) $resposta['data']['Itens'] as $item) {
+            if (!is_array($item)) continue;
+
+            $id = (int) $this->campo($item, ['Id'], 0);
+            if ($id <= 0) continue;
+
+            $servicos[] = [
+                'id' => $id,
+                'nome' => trim((string) $this->campo($item, ['Nome'], '')),
+                'observacao' => trim((string) $this->campo($item, ['Observacao'], '')),
+                // O tipo de serviço é o código fiscal (LC 116) e determina a
+                // tributação da NFS-e — por isso vai para a tela, e não só o nome.
+                'tipo' => trim((string) $this->campo($item, ['NomeTipoServico'], '')),
+            ];
+        }
+
+        return [
+            'success' => TRUE,
+            'message' => '',
+            'data' => [
+                'servicos' => $servicos,
+                'total' => (int) $resposta['data']['TotalItens'],
+                'exibindo' => count($servicos),
+            ],
+        ];
+    }
+
+    /**
+     * Vincula o serviço do ERP ao contrato.
+     *
+     * O Id vem da tela, mas quem confirma que ele existe é o `Servico/Obter` —
+     * o POST nunca é fonte de verdade, mesma regra do vínculo de contrato. É de
+     * lá que sai o nome gravado, e não do POST: assim o retrato guardado é o do
+     * ERP, não o que o navegador mandou.
+     *
+     * @param  int $idContract
+     * @param  int $idCompany
+     * @param  int $idServicoBc
+     * @param  int $idUser
+     * @return array success, message, data
+     */
+    public function vincularServico($idContract, $idCompany, $idServicoBc, $idUser)
+    {
+        $contrato = $this->global_model->getWhere_off('crm_contracts', [
+            'id' => (int) $idContract,
+            'id_company' => (int) $idCompany,
+        ], TRUE);
+
+        if (empty($contrato)) {
+            return ['success' => FALSE, 'message' => 'Contrato não encontrado.', 'data' => NULL];
+        }
+
+        $idServicoBc = (int) $idServicoBc;
+        if ($idServicoBc <= 0) {
+            return ['success' => FALSE, 'message' => 'Selecione um serviço do catálogo.', 'data' => NULL];
+        }
+
+        $config = $this->getConfig($idCompany);
+        if (!$config['success']) {
+            return ['success' => FALSE, 'message' => $config['message'], 'data' => NULL];
+        }
+
+        $suspendeu = sessao_suspender();
+
+        try {
+            $resposta = $this->client()->obterServico($config['config'], $idServicoBc);
+        } catch (Throwable $e) {
+            $this->logarErroServico($idCompany, 'obter', $e->getMessage());
+            return ['success' => FALSE, 'message' => 'Falha inesperada ao confirmar o serviço no Bom Controle.', 'data' => NULL];
+        } finally {
+            sessao_retomar($suspendeu);
+        }
+
+        if (!$resposta['success']) {
+            $this->logarErroServico($idCompany, 'obter#' . $idServicoBc, $resposta['message']);
+            return ['success' => FALSE, 'message' => 'O Bom Controle não reconheceu o serviço #' . $idServicoBc . '. ' . $resposta['message'], 'data' => NULL];
+        }
+
+        $servico = is_array($resposta['data']) ? $resposta['data'] : [];
+        $idConfirmado = (int) $this->campo($servico, ['Id'], 0);
+        if ($idConfirmado !== $idServicoBc) {
+            return ['success' => FALSE, 'message' => 'A resposta do Bom Controle não corresponde ao serviço pedido.', 'data' => NULL];
+        }
+
+        $nome = trim((string) $this->campo($servico, ['Nome'], ''));
+
+        $this->global_model->edit('crm_contracts', [
+            'bomcontrole_service_id' => $idServicoBc,
+            'bomcontrole_service_name' => mb_substr($nome, 0, 200),
+            'modified' => date('Y-m-d H:i:s'),
+            'modified_by' => (int) $idUser,
+        ], 'id', (int) $idContract);
+
+        return [
+            'success' => TRUE,
+            'message' => 'Serviço vinculado: ' . $nome,
+            'data' => [
+                'id' => $idServicoBc,
+                'nome' => $nome,
+                'tipo' => trim((string) $this->campo($servico, ['NomeTipoServico'], '')),
+            ],
+        ];
+    }
+
+    /**
+     * Remove o vínculo. Não toca no ERP — o catálogo de lá não muda.
+     *
+     * @param  int $idContract
+     * @param  int $idCompany
+     * @param  int $idUser
+     * @return array success, message, data
+     */
+    public function desvincularServico($idContract, $idCompany, $idUser)
+    {
+        $contrato = $this->global_model->getWhere_off('crm_contracts', [
+            'id' => (int) $idContract,
+            'id_company' => (int) $idCompany,
+        ], TRUE);
+
+        if (empty($contrato)) {
+            return ['success' => FALSE, 'message' => 'Contrato não encontrado.', 'data' => NULL];
+        }
+
+        $this->global_model->edit('crm_contracts', [
+            'bomcontrole_service_id' => NULL,
+            'bomcontrole_service_name' => NULL,
+            'modified' => date('Y-m-d H:i:s'),
+            'modified_by' => (int) $idUser,
+        ], 'id', (int) $idContract);
+
+        return ['success' => TRUE, 'message' => 'Serviço desvinculado.', 'data' => NULL];
+    }
+
+    /**
+     * @param int    $idCompany
+     * @param string $operacao
+     * @param string $mensagem
+     */
+    private function logarErroServico($idCompany, $operacao, $mensagem)
+    {
+        log_message('error', sprintf(
+            '[BOMCONTROLE] Catalogo de servicos — empresa=%d operacao=%s: %s',
+            (int) $idCompany,
+            (string) $operacao,
+            (string) $mensagem
+        ));
     }
 
     // ------------------------------------------------------------------
@@ -922,7 +1123,7 @@ class Bomcontrole_model extends CI_Model
     }
 
     /**
-     * Extrato financeiro do contrato: faturas em aberto (todas as vencidas +
+     * Extrato Bom Controle do contrato: faturas em aberto (todas as vencidas +
      * a vencer em até DIAS_FUTURO dias) e pagas (últimos MESES_PAGAS meses),
      * ordenadas do vencimento mais recente para o mais antigo.
      *

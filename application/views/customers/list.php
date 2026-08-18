@@ -7,6 +7,7 @@ $fKeyword = isset($filtro['keyword']) ? trim((string) $filtro['keyword']) : '';
 $fTipo = isset($filtro['type']) ? (string) $filtro['type'] : '';
 $fServico = isset($filtro_avancado['id_service_type']) ? (int) $filtro_avancado['id_service_type'] : 0;
 $fSituacao = isset($filtro_avancado['situation']) ? (string) $filtro_avancado['situation'] : '';
+$fSemVinculoBc = !empty($filtro_avancado['bomcontrole_unlinked']);
 
 // Chips do que está ESCONDIDO no offcanvas — sem eles o usuário não tem como
 // saber por que a listagem está curta. A busca por palavra-chave não entra
@@ -19,6 +20,7 @@ if ($fServico > 0) {
   }
 }
 if ($fSituacao !== '' && isset($contract_situations[$fSituacao])) $chips[] = $contract_situations[$fSituacao];
+if ($fSemVinculoBc) $chips[] = 'Contrato sem vínculo com o Bom Controle';
 
 // "Tem algum filtro aplicado?" é pergunta diferente de "tem chip?": a busca
 // visível também recorta a listagem e também precisa do LIMPAR.
@@ -151,6 +153,22 @@ $temFiltro = ($fKeyword !== '' || !empty($chips));
               <?php } ?>
             </select>
             <small class="form-text text-muted">Cliente vigente é o que tem pelo menos um contrato com status <strong>vigente</strong>.</small>
+          </div>
+
+          <div class="form-group mb-3">
+            <label class="form-label">Integração</label>
+            <?php
+            // O hidden garante que a chave chegue ao POST mesmo com o switch
+            // desmarcado: checkbox desmarcado não é enviado pelo navegador, e o
+            // post_filtrar distingue "veio deste formulário" de "veio da busca
+            // rápida do topo" pela presença da chave.
+            ?>
+            <input type="hidden" name="<?php echo $filtro_avancado_campo; ?>[bomcontrole_unlinked]" value="0">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" role="switch" id="f_bomcontrole_unlinked" name="<?php echo $filtro_avancado_campo; ?>[bomcontrole_unlinked]" value="1" <?php if ($fSemVinculoBc) echo 'checked=""'; ?>>
+              <label class="form-check-label" for="f_bomcontrole_unlinked">Somente clientes com contrato sem vínculo com o Bom Controle</label>
+            </div>
+            <small class="form-text text-muted">Considera os contratos <strong>não encerrados</strong> e cobrados pelo Bom Controle — contrato migrado para o faturamento próprio não é pendência.</small>
           </div>
         </div>
         <div class="offcanvas-header border-top d-block">

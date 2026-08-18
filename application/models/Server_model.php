@@ -16,6 +16,12 @@ class Server_model extends CI_Model
     /** Tipos aceitos no cadastro e na sincronização. */
     const TYPES = ['whm', 'directadmin', 'cloudpanel'];
 
+    /**
+     * Teto de tempo, em segundos, do laço que suspende as contas de um
+     * contrato. Ver suspendContractAccounts().
+     */
+    const ORCAMENTO_SUSPENSAO_SEGUNDOS = 60;
+
     public function __construct()
     {
         parent::__construct();
@@ -392,6 +398,295 @@ class Server_model extends CI_Model
             'modified' => $agora,
             'modified_by' => (int) $idUser,
         ], 'id', (int) $idServer);
+    }
+
+    // ------------------------------------------------------------------
+    // Suspensão das contas de um contrato
+    // ------------------------------------------------------------------
+
+    /**
+     * Suspende (ou reativa) nos painéis as contas dos domínios de um contrato.
+     *
+     * Chamado quando o contrato é suspenso, reativado ou encerrado — a parada
+     * do serviço acompanha a parada do contrato, em vez de depender de alguém
+     * lembrar de abrir o WHM depois.
+     *
+     * O que é uma "unidade" muda por painel, e isso não é detalhe: WHM e
+     * DirectAdmin suspendem a CONTA inteira (todos os domínios daquele usuário
+     * caem juntos), então os domínios de um mesmo owner viram UMA chamada; o
+     * CloudPanel age por vhost, então cada domínio é uma unidade própria.
+     *
+     * Nunca lança exceção e nunca decide o destino do contrato: devolve o que
+     * conseguiu e o que faltou, e quem chama resolve o que fazer com isso.
+     *
+     * @param  int         $idContract
+     * @param  int         $idCompany  escopo do tenant
+     * @param  string      $acao       'suspender' | 'reativar'
+     * @param  int         $idUser
+     * @param  string|null $motivo     texto gravado no painel (só na suspensão)
+     * @return array
+     */
+    public function suspendContractAccounts($idContract, $idCompany, $acao, $idUser, $motivo = NULL)
+    {
+        $suspender = ($acao === 'suspender');
+        $resultado = [
+            'acao' => $suspender ? 'suspender' : 'reativar',
+            'contas_ok' => 0,
+            'dominios_ok' => 0,
+            'ids_contract_domains' => [],
+            'falhas' => [],
+            'bloqueados' => [],
+            'sem_vinculo' => [],
+            'nao_processadas' => 0,
+        ];
+
+        $linhas = $this->db->query(
+            'SELECT cd.id, cd.domain, cd.id_server_domain,
+                    sd.domain AS server_domain, sd.owner_username, sd.id_server,
+                    s.name AS server_name, s.type AS server_type
+               FROM crm_contracts_domains cd
+          LEFT JOIN crm_servers_domains sd ON sd.id = cd.id_server_domain
+          LEFT JOIN crm_servers s ON s.id = sd.id_server
+              WHERE cd.id_contract = ? AND cd.id_company = ?
+           ORDER BY cd.domain',
+            [(int) $idContract, (int) $idCompany]
+        )->result();
+
+        if (empty($linhas)) {
+            return $resultado;
+        }
+
+        // Agrupamento em unidades de suspensão. Domínio sem vínculo não tem
+        // conta para suspender — é informação para a tela, não erro: cadastrar
+        // domínio sem correspondência no servidor é estado normal aqui.
+        $unidades = [];
+        foreach ($linhas as $linha) {
+            if (empty($linha->id_server_domain) || empty($linha->id_server)) {
+                $resultado['sem_vinculo'][] = $linha->domain;
+                continue;
+            }
+
+            $tipo = mb_strtolower((string) $linha->server_type);
+            $porDominio = ($tipo === 'cloudpanel');
+            $conta = trim((string) $linha->owner_username);
+
+            if (!in_array($tipo, self::TYPES, TRUE)) {
+                $resultado['falhas'][] = [
+                    'servidor' => (string) $linha->server_name,
+                    'conta' => $linha->domain,
+                    'erro' => 'O servidor não suporta suspensão automática (tipo ' . $tipo . ').',
+                ];
+                continue;
+            }
+
+            if (!$porDominio && $conta === '') {
+                $resultado['falhas'][] = [
+                    'servidor' => (string) $linha->server_name,
+                    'conta' => $linha->domain,
+                    'erro' => 'A sincronização não trouxe o usuário dono da conta — suspenda pelo painel.',
+                ];
+                continue;
+            }
+
+            $chave = $porDominio
+                ? (int) $linha->id_server . '|d|' . mb_strtolower((string) $linha->server_domain)
+                : (int) $linha->id_server . '|c|' . mb_strtolower($conta);
+
+            if (!isset($unidades[$chave])) {
+                $unidades[$chave] = [
+                    'id_server' => (int) $linha->id_server,
+                    'server_name' => (string) $linha->server_name,
+                    'tipo' => $tipo,
+                    'por_dominio' => $porDominio,
+                    'alvo' => $porDominio ? (string) $linha->server_domain : $conta,
+                    'ids_cd' => [],
+                    'ids_sd' => [],
+                ];
+            }
+
+            $unidades[$chave]['ids_cd'][] = (int) $linha->id;
+            $unidades[$chave]['ids_sd'][] = (int) $linha->id_server_domain;
+        }
+
+        if (empty($unidades)) {
+            return $resultado;
+        }
+
+        // Conta compartilhada com outro contrato VIGENTE não é suspensa: no
+        // WHM/DirectAdmin a suspensão derruba o usuário inteiro, e o site de um
+        // cliente adimplente cairia junto com o do inadimplente. Só vale para a
+        // suspensão — reativar conta compartilhada não tira ninguém do ar.
+        $compartilhadas = [];
+        if ($suspender) {
+            $outros = $this->db->query(
+                "SELECT sd.id_server, LOWER(sd.owner_username) AS owner,
+                        GROUP_CONCAT(DISTINCT c.id ORDER BY c.id SEPARATOR ', ') AS contratos
+                   FROM crm_contracts_domains cd
+                   JOIN crm_servers_domains sd ON sd.id = cd.id_server_domain
+                   JOIN crm_servers s ON s.id = sd.id_server
+                   JOIN crm_contracts c ON c.id = cd.id_contract
+                  WHERE cd.id_company = ? AND cd.id_contract <> ? AND c.status = 'vigente'
+                    AND s.type IN ('whm', 'directadmin') AND sd.owner_username <> ''
+               GROUP BY sd.id_server, LOWER(sd.owner_username)",
+                [(int) $idCompany, (int) $idContract]
+            )->result();
+
+            foreach ($outros as $outro) {
+                $compartilhadas[(int) $outro->id_server . '|' . (string) $outro->owner] = (string) $outro->contratos;
+            }
+        }
+
+        // Servidores e credenciais resolvidos ANTES do laço de rede: decifrar
+        // dentro dele repetiria o trabalho por unidade (64 contas do mesmo
+        // servidor, na base atual) e misturaria erro de cadastro com erro de
+        // painel.
+        $configs = [];
+        foreach ($unidades as $chave => $unidade) {
+            $idServer = $unidade['id_server'];
+            if (array_key_exists($idServer, $configs)) continue;
+
+            $servidor = $this->getServer($idServer, $idCompany);
+            if ($servidor === NULL) {
+                $configs[$idServer] = ['erro' => 'Servidor não encontrado neste tenant.'];
+                continue;
+            }
+
+            $config = $this->getConnectionConfig($servidor);
+            if ($config === FALSE) {
+                $configs[$idServer] = ['erro' => 'Não foi possível decifrar a credencial do servidor.'];
+                continue;
+            }
+
+            $configs[$idServer] = ['config' => $config];
+        }
+
+        $texto = ($motivo !== NULL && trim((string) $motivo) !== '')
+            ? trim((string) $motivo)
+            : 'Contrato #' . (int) $idContract . ' suspenso no CDW Finance';
+
+        $aplicadas = [];
+        $inicio = microtime(TRUE);
+
+        // Uma requisição não pode ficar presa à quantidade de contas do
+        // contrato: 98% deles têm até 5, mas há um com 65. Passado o orçamento,
+        // o que sobrou é reportado como não processado em vez de estourar o
+        // tempo do PHP no meio de uma chamada ao painel.
+        $suspendeu = sessao_suspender();
+        try {
+            foreach ($unidades as $unidade) {
+                if ((microtime(TRUE) - $inicio) > self::ORCAMENTO_SUSPENSAO_SEGUNDOS) {
+                    $resultado['nao_processadas']++;
+                    continue;
+                }
+
+                $rotulo = $unidade['por_dominio'] ? $unidade['alvo'] : 'conta ' . $unidade['alvo'];
+                $idServer = $unidade['id_server'];
+
+                if (isset($configs[$idServer]['erro'])) {
+                    $resultado['falhas'][] = [
+                        'servidor' => $unidade['server_name'],
+                        'conta' => $rotulo,
+                        'erro' => $configs[$idServer]['erro'],
+                    ];
+                    continue;
+                }
+
+                if (!$unidade['por_dominio']) {
+                    $chaveConta = $idServer . '|' . mb_strtolower($unidade['alvo']);
+                    if (isset($compartilhadas[$chaveConta])) {
+                        $resultado['bloqueados'][] = [
+                            'servidor' => $unidade['server_name'],
+                            'conta' => $rotulo,
+                            'motivo' => 'a mesma conta atende o(s) contrato(s) vigente(s) ' . $compartilhadas[$chaveConta]
+                                . ' — suspender derrubaria os sites deles também.',
+                        ];
+                        continue;
+                    }
+                }
+
+                $retorno = $this->aplicarSuspensao($unidade, $configs[$idServer]['config'], $suspender, $texto);
+
+                if (empty($retorno['success'])) {
+                    $resultado['falhas'][] = [
+                        'servidor' => $unidade['server_name'],
+                        'conta' => $rotulo,
+                        'erro' => (string) $retorno['message'],
+                    ];
+
+                    log_message('error', '[SUSPENSAO] Falha ao ' . $resultado['acao'] . ' — tenant ' . (int) $idCompany
+                        . ', contrato ' . (int) $idContract . ', servidor ' . $unidade['server_name']
+                        . ' (' . $unidade['tipo'] . '), ' . $rotulo . ': ' . $retorno['message']);
+                    continue;
+                }
+
+                $resultado['contas_ok']++;
+                $aplicadas[] = $unidade;
+            }
+        } catch (Throwable $e) {
+            log_message('error', '[SUSPENSAO] Exceção ao ' . $resultado['acao'] . ' — tenant ' . (int) $idCompany
+                . ', contrato ' . (int) $idContract . ': ' . $e->getMessage());
+            $resultado['falhas'][] = [
+                'servidor' => '—',
+                'conta' => '—',
+                'erro' => 'Erro inesperado ao falar com o painel: ' . $e->getMessage(),
+            ];
+        }
+        sessao_retomar($suspendeu);
+
+        // O estado local só é gravado depois que o painel confirmou. As linhas
+        // atualizadas são as do contrato: as outras contas do mesmo usuário
+        // caíram junto, mas quem as corrige é a sincronização — inventar aqui o
+        // status de domínio que este contrato não citou seria escrever sobre o
+        // que não foi verificado.
+        $idsSd = [];
+        foreach ($aplicadas as $unidade) {
+            $resultado['ids_contract_domains'] = array_merge($resultado['ids_contract_domains'], $unidade['ids_cd']);
+            $idsSd = array_merge($idsSd, $unidade['ids_sd']);
+        }
+
+        $resultado['dominios_ok'] = count($resultado['ids_contract_domains']);
+        $idsSd = array_values(array_unique($idsSd));
+
+        if (!empty($idsSd)) {
+            $agora = date('Y-m-d H:i:s');
+            $placeholders = implode(', ', array_fill(0, count($idsSd), '?'));
+            $binds = array_merge(
+                [$suspender ? 'suspenso' : 'ativo', $suspender ? mb_substr($texto, 0, 500) : NULL, $agora, (int) $idUser],
+                $idsSd
+            );
+
+            $this->db->query(
+                'UPDATE `crm_servers_domains`
+                    SET `status` = ?, `suspension_reason` = ?, `modified` = ?, `modified_by` = ?
+                  WHERE `id` IN (' . $placeholders . ')',
+                $binds
+            );
+        }
+
+        return $resultado;
+    }
+
+    /**
+     * Despacha a unidade para a library do painel.
+     *
+     * @param  array  $unidade
+     * @param  array  $config
+     * @param  bool   $suspender
+     * @param  string $motivo
+     * @return array  success, message
+     */
+    private function aplicarSuspensao($unidade, $config, $suspender, $motivo)
+    {
+        $cliente = $this->getClient($unidade['tipo']);
+        if ($cliente === FALSE) {
+            return ['success' => FALSE, 'message' => 'Tipo de servidor sem integração de suspensão.'];
+        }
+
+        if ($unidade['tipo'] === 'whm') {
+            return $cliente->setSuspension($config, $unidade['alvo'], $suspender, $suspender ? $motivo : NULL);
+        }
+
+        return $cliente->setSuspension($config, $unidade['alvo'], $suspender);
     }
 
     /**

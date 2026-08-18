@@ -143,6 +143,11 @@ class Painel extends MY_Controller
         $mesCorrente = end($this->data['ind_movimento_meses']);
         $this->data['ind_contratos_novos_mes'] = $mesCorrente['entrada_qtd'];
 
+        // Por que os contratos da barra laranja de saídas foram embora: mesma
+        // janela do movimento (janelaMovimento), para os dois cards não
+        // discordarem sobre o mesmo período.
+        $this->data['ind_cancelamentos'] = $this->indicadoresCancelamentos($idCompany);
+
         $this->data['ind_por_servico'] = $this->contratosVigentesPorServico($idCompany);
         $this->data['ind_dominios'] = $this->indicadoresDominios($idCompany);
         $this->data['ind_espaco'] = $this->indicadoresEspaco($idCompany);
@@ -312,13 +317,121 @@ class Painel extends MY_Controller
      * @param  int $idCompany
      * @return array lista ordenada do mais antigo ao mês corrente
      */
+    /**
+     * Cancelamentos da janela, agrupados pelo motivo do encerramento.
+     *
+     * Responde três perguntas que a barra de saídas do card ao lado não
+     * responde: POR QUE os contratos saíram, QUANTO cada motivo custou e QUANTO
+     * TEMPO o contrato durou até sair.
+     *
+     * Decisões:
+     *
+     *  - **Uma query só, e os totais derivados dela em PHP.** Um total vindo de
+     *    segunda query pode discordar da soma das fatias por diferença de
+     *    janela ou de filtro — e o usuário veria o gráfico contradizer o número
+     *    logo acima dele.
+     *
+     *  - **LEFT JOIN no catálogo**: motivo que não está (ou não está mais) em
+     *    `crm_end_reasons` continua aparecendo, com o próprio slug de rótulo. O
+     *    contrato guarda o slug de propósito (ver a migration 032), e um
+     *    INNER JOIN faria o contrato encerrado sumir do gráfico ao aposentarem
+     *    o motivo — a soma das fatias deixaria de bater com o total.
+     *
+     *  - **A vida do contrato vem de `SUM(DATEDIFF(...))`, não de `AVG`**: com
+     *    a soma dá para calcular a média por motivo E a média geral ponderada;
+     *    com médias por motivo, a "média das médias" daria peso igual a um
+     *    motivo com 1 contrato e a outro com 30.
+     *
+     *  - `ended IS NOT NULL` não é escrito: `NULL >= '...'` devolve NULL, que
+     *    não é verdadeiro, então contrato vigente já fica de fora sozinho.
+     *
+     * @param  int $idCompany
+     * @return array motivos (lista), total, valor, dias, meses_medio
+     */
+    private function indicadoresCancelamentos($idCompany)
+    {
+        list($inicio, $fim) = $this->janelaMovimento();
+
+        $sql = "SELECT c.ended_reason AS slug,
+                       COALESCE(r.name, c.ended_reason) AS nome,
+                       COALESCE(NULLIF(r.color, ''), '#6c757d') AS cor,
+                       COALESCE(r.sort_order, 999) AS ordem,
+                       COUNT(*) AS quantidade,
+                       SUM(c.value) AS valor,
+                       SUM(DATEDIFF(c.ended, c.created)) AS dias
+                  FROM crm_contracts c
+             LEFT JOIN crm_end_reasons r ON r.slug = c.ended_reason
+                 WHERE c.id_company = ? AND c.ended >= ? AND c.ended < ?
+              GROUP BY c.ended_reason, r.name, r.color, r.sort_order
+              ORDER BY quantidade DESC, valor DESC";
+
+        $linhas = $this->db->query($sql, [(int) $idCompany, $inicio, $fim])->result();
+
+        $motivos = [];
+        $total = 0;
+        $valor = 0.0;
+        $dias = 0;
+
+        foreach ($linhas as $linha) {
+            $quantidade = (int) $linha->quantidade;
+            $motivos[] = [
+                'slug' => (string) $linha->slug,
+                'nome' => (string) $linha->nome,
+                'cor' => (string) $linha->cor,
+                'quantidade' => $quantidade,
+                'valor' => (float) $linha->valor,
+                // Contrato sem `created` não tem vida a medir; o DATEDIFF
+                // devolveria NULL e o cast o zera, o que só afeta a média dele.
+                'dias' => (int) $linha->dias,
+            ];
+
+            $total += $quantidade;
+            $valor += (float) $linha->valor;
+            $dias += (int) $linha->dias;
+        }
+
+        return [
+            'motivos' => $motivos,
+            'total' => $total,
+            'valor' => $valor,
+            // 30.44 = média de dias do mês no ano. O rótulo diz "meses", e
+            // dividir por 30 daria 12,17 meses para um contrato de um ano.
+            'meses_medio' => ($total > 0) ? ($dias / $total) / 30.44 : 0.0,
+        ];
+    }
+    /**
+     * Limites da janela de MESES_MOVIMENTO meses, meio-aberta.
+     *
+     * Vive num método próprio porque DOIS cards dependem dela: o movimento de
+     * contratos e o de cancelamentos. Se cada um calculasse a sua, bastaria um
+     * `-11` virar `-12` de um lado para o valor perdido do card de
+     * cancelamentos parar de bater com a soma das barras de saída do outro — e
+     * seriam dois números discordando sobre a mesma pergunta, na mesma tela.
+     *
+     * Ancora no dia 1 ANTES de somar/subtrair meses: `strtotime('+1 month')` a
+     * partir de hoje estoura em 31/01 (vira 03/03). E sai do PHP, não de
+     * NOW()/CURDATE(): o `ended` gravado também é hora do PHP, e misturar o
+     * relógio do MySQL abriria divergência de fuso na virada do mês.
+     *
+     * Devolve também a ÂNCORA (dia 1 do mês corrente), que o laço dos baldes
+     * de mês usa: recalculá-la lá seria abrir a porta para os meses do gráfico
+     * e a janela da query divergirem.
+     *
+     * @return array [inicio, fim, primeiroDoMes]
+     */
+    private function janelaMovimento()
+    {
+        $primeiroDoMes = strtotime(date('Y-m-01'));
+
+        return [
+            date('Y-m-01 00:00:00', strtotime('-' . (self::MESES_MOVIMENTO - 1) . ' months', $primeiroDoMes)),
+            date('Y-m-01 00:00:00', strtotime('+1 month', $primeiroDoMes)),
+            $primeiroDoMes,
+        ];
+    }
     private function movimentoPorMes($idCompany)
     {
-        // Ancora no dia 1 ANTES de somar/subtrair meses: `strtotime('+1 month')`
-        // a partir de hoje estoura em 31/01 (vira 03/03).
-        $primeiroDoMes = strtotime(date('Y-m-01'));
-        $inicio = date('Y-m-01 00:00:00', strtotime('-' . (self::MESES_MOVIMENTO - 1) . ' months', $primeiroDoMes));
-        $fim = date('Y-m-01 00:00:00', strtotime('+1 month', $primeiroDoMes));
+        list($inicio, $fim, $primeiroDoMes) = $this->janelaMovimento();
 
         $sql = "SELECT periodo,
                        SUM(entrada_valor) AS entrada_valor,

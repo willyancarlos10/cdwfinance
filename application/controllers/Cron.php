@@ -366,6 +366,357 @@ class Cron extends CI_Controller
     $this->executarWhois('br', 'cron_sync_whois_br');
   }
 
+  // ------------------------------------------------------------------
+  // Faturamento
+  //
+  // As duas rotinas são separadas de propósito: índice faltando não pode
+  // impedir a geração de faturas dos outros contratos, e o painel de CRON
+  // precisa ligar e desligar cada uma por conta própria.
+  //
+  // A ORDEM no crontab importa — o reajuste roda ANTES da geração, para que a
+  // fatura do dia já saia com o valor novo:
+  //   0 5 * * *  cd /caminho/do/projeto && php index.php cron cron_reajustar_contratos
+  //   30 5 * * * cd /caminho/do/projeto && php index.php cron cron_gerar_faturas
+  // ------------------------------------------------------------------
+
+  /**
+   * Gera as faturas dos contratos faturados pelo CDW Finance.
+   *
+   * Só CLI, como o sync de servidores: a rodada percorre a base inteira e pelo
+   * navegador morreria no max_execution_time com metade do trabalho feito.
+   */
+  public function cron_gerar_faturas()
+  {
+    // if (!$this->input->is_cli_request()) {
+    //   echo 'Este processo só pode ser executado via CLI.';
+    //   return;
+    // }
+
+    if (!$this->isCronActive('cron_gerar_faturas')) return;
+
+    @set_time_limit(0);
+
+    $lockHandle = $this->travar('cron_gerar_faturas');
+    if ($lockHandle === FALSE) return;
+
+    $this->load->model('invoice_model');
+
+    $idUser = (int) $this->config->item('id_user_process_auto');
+    $contratos = $this->invoice_model->getBillableContracts();
+    $total = count($contratos);
+
+    echo "cron_gerar_faturas: {$total} contrato(s) elegível(is)." . PHP_EOL;
+
+    $geradas = 0;
+    $comFatura = 0;
+    $falhas = 0;
+    $mensagensDeErro = [];
+
+    foreach ($contratos as $contrato) {
+      $rotulo = 'contrato #' . $contrato->id;
+
+      try {
+        $resultado = $this->invoice_model->generateForContract($contrato, $idUser);
+      } catch (Throwable $e) {
+        $resultado = ['success' => FALSE, 'message' => $e->getMessage(), 'data' => ['geradas' => 0]];
+      }
+
+      $quantas = (int) $resultado['data']['geradas'];
+
+      if (!$resultado['success']) {
+        $falhas++;
+        $mensagensDeErro[] = $rotulo . ': ' . $resultado['message'];
+        echo "  [ERRO] {$rotulo}: {$resultado['message']}" . PHP_EOL;
+        continue;
+      }
+
+      if ($quantas > 0) {
+        $geradas += $quantas;
+        $comFatura++;
+        echo "  [OK]   {$rotulo}: {$quantas} fatura(s) gerada(s)." . PHP_EOL;
+      }
+    }
+
+    $this->global_model->edit('crm_cron_logs', [
+      'modified' => date('Y-m-d H:i:s'),
+      'errors' => empty($mensagensDeErro) ? NULL : mb_substr(implode(' | ', $mensagensDeErro), 0, 5000),
+    ], 'name', 'cron_gerar_faturas');
+
+    $this->destravar($lockHandle);
+
+    echo "Concluído: {$geradas} fatura(s) em {$comFatura} contrato(s), {$falhas} com erro." . PHP_EOL;
+  }
+
+  /**
+   * Avisa e aplica os reajustes anuais.
+   *
+   * Duas fases na mesma rotina: primeiro os avisos (contratos que entram na
+   * janela de antecedência), depois as aplicações (contratos cuja data chegou).
+   * Juntas porque compartilham o cálculo do acumulado e a leitura dos índices;
+   * separadas do faturamento porque a falha de uma não pode parar o outro.
+   */
+  public function cron_reajustar_contratos()
+  {
+    if (!$this->input->is_cli_request()) {
+      echo 'Este processo só pode ser executado via CLI.';
+      return;
+    }
+
+    if (!$this->isCronActive('cron_reajustar_contratos')) return;
+
+    @set_time_limit(0);
+
+    $lockHandle = $this->travar('cron_reajustar_contratos');
+    if ($lockHandle === FALSE) return;
+
+    $this->load->model('adjustment_model');
+
+    $idUser = (int) $this->config->item('id_user_process_auto');
+    $mensagensDeErro = [];
+
+    // --- Fase 1: avisos prévios ---
+    $aNotificar = $this->adjustment_model->getContractsToNotify();
+    echo 'cron_reajustar_contratos: ' . count($aNotificar) . ' aviso(s) pendente(s).' . PHP_EOL;
+
+    $avisados = 0;
+    foreach ($aNotificar as $contrato) {
+      $rotulo = 'contrato #' . $contrato->id;
+
+      try {
+        $resultado = $this->adjustment_model->notifyContract($contrato, $idUser);
+      } catch (Throwable $e) {
+        $resultado = ['success' => FALSE, 'message' => $e->getMessage(), 'data' => NULL];
+      }
+
+      if (!empty($resultado['success'])) {
+        $avisados++;
+        echo "  [AVISO] {$rotulo}: {$resultado['message']}" . PHP_EOL;
+      } else {
+        $mensagensDeErro[] = 'aviso ' . $rotulo . ': ' . $resultado['message'];
+        echo "  [ERRO]  {$rotulo}: {$resultado['message']}" . PHP_EOL;
+      }
+    }
+
+    // --- Fase 2: aplicação ---
+    $aReajustar = $this->adjustment_model->getDueContracts();
+    echo 'Reajustes a aplicar: ' . count($aReajustar) . PHP_EOL;
+
+    $aplicados = 0;
+    $pulados = 0;
+
+    foreach ($aReajustar as $contrato) {
+      $rotulo = 'contrato #' . $contrato->id;
+
+      try {
+        $resultado = $this->adjustment_model->applyForContract($contrato, $idUser);
+      } catch (Throwable $e) {
+        $resultado = ['success' => FALSE, 'message' => $e->getMessage(), 'data' => NULL];
+      }
+
+      if (empty($resultado['success'])) {
+        // Índice incompleto é o caso comum aqui, e não é falha da rotina: o
+        // contrato fica para a próxima rodada, com o valor intacto.
+        $pulados++;
+        $mensagensDeErro[] = $rotulo . ': ' . $resultado['message'];
+        echo "  [PULA]  {$rotulo}: {$resultado['message']}" . PHP_EOL;
+        continue;
+      }
+
+      $aplicados++;
+      $dados = $resultado['data'];
+      echo sprintf(
+        "  [OK]    %s: %s%% — de %s para %s.%s" . PHP_EOL,
+        $rotulo,
+        $dados['rate'],
+        reais($dados['value_before']),
+        reais($dados['value_after']),
+        $dados['avisado'] ? '' : ' (sem aviso prévio registrado)'
+      );
+
+      if (empty($dados['avisado'])) {
+        log_message('error', sprintf(
+          '[REAJUSTE] Contrato %d reajustado sem aviso previo ao cliente (%s%%).',
+          (int) $contrato->id,
+          $dados['rate']
+        ));
+      }
+    }
+
+    $this->global_model->edit('crm_cron_logs', [
+      'modified' => date('Y-m-d H:i:s'),
+      'errors' => empty($mensagensDeErro) ? NULL : mb_substr(implode(' | ', $mensagensDeErro), 0, 5000),
+    ], 'name', 'cron_reajustar_contratos');
+
+    $this->destravar($lockHandle);
+
+    echo "Concluído: {$avisados} aviso(s), {$aplicados} reajuste(s) aplicado(s), {$pulados} pulado(s)." . PHP_EOL;
+  }
+
+  /**
+   * Monitoramento dos sites dos clientes: DNS ao vivo e estado da home.
+   *
+   * Só CLI: são centenas de domínios com uma consulta de DNS e pelo menos uma
+   * requisição HTTP cada, e a rodada pode passar de vinte minutos.
+   *
+   * Crontab (depois da sincronização dos servidores e dos WHOIS, para o retrato
+   * do dia já refletir a noite):
+   *
+   *   0 6 * * * cd /caminho/do/projeto && php index.php cron cron_monitorar_sites
+   *
+   * O envio do resumo por e-mail NÃO acontece aqui — quem despacha a fila é o
+   * cron_enviar_email, que já roda.
+   */
+  public function cron_monitorar_sites()
+  {
+    if (!$this->input->is_cli_request()) {
+      echo 'Este processo só pode ser executado via CLI.';
+      return;
+    }
+
+    if (!$this->isCronActive('cron_monitorar_sites')) return;
+
+    @set_time_limit(0);
+
+    $lockHandle = $this->travar('cron_monitorar_sites');
+    if ($lockHandle === FALSE) return;
+
+    $this->load->model('site_monitor_model');
+
+    $idUser = (int) $this->config->item('id_user_process_auto');
+    // `email` entra na seleção porque a cascata de destinatários do resumo cai
+    // nele quando não há endereço em Parâmetros gerais.
+    $empresas = $this->db->query(
+      'SELECT `id`, `byname`, `email` FROM `crm_companies` WHERE `id_status` = 1 ORDER BY `id` ASC'
+    )->result();
+
+    $mensagensDeErro = [];
+    $totalChecados = 0;
+    $totalEventos = 0;
+
+    foreach ($empresas as $empresa) {
+      $rotulo = 'empresa #' . $empresa->id . ' (' . $empresa->byname . ')';
+
+      try {
+        $relatorio = $this->site_monitor_model->executarRodada($empresa->id, $idUser);
+      } catch (Throwable $e) {
+        $mensagensDeErro[] = $rotulo . ': ' . $e->getMessage();
+        echo "  [ERRO] {$rotulo}: {$e->getMessage()}" . PHP_EOL;
+        log_message('error', '[MONITOR] Falha na rodada — ' . $rotulo . ': ' . $e->getMessage());
+        continue;
+      }
+
+      $pop = $relatorio['populacao'];
+      $fora = $relatorio['fora_do_recorte'];
+
+      echo $rotulo . ': ' . $pop['elegiveis'] . ' domínio(s) monitorado(s)'
+        . ' (' . $pop['novos'] . ' novo(s), ' . $pop['reativados'] . ' reativado(s), '
+        . $pop['desativados'] . ' desativado(s)).' . PHP_EOL;
+
+      // Descarte silencioso numa rotina de vigilância é indistinguível de "está
+      // tudo bem" — por isso tudo que ficou de fora é dito em voz alta.
+      if (!empty($pop['descartados'])) {
+        echo '  [INFO] ' . count($pop['descartados']) . ' nome(s) fora do padrão de host, ignorado(s): '
+          . implode(', ', array_slice($pop['descartados'], 0, 10))
+          . (count($pop['descartados']) > 10 ? ' ...' : '') . PHP_EOL;
+      }
+      if ($fora['sem_tipo'] > 0) {
+        echo '  [INFO] ' . $fora['sem_tipo'] . ' domínio(s) de contrato SEM tipo de serviço cadastrado'
+          . ' ficaram de fora — preencher o tipo do contrato os traz para o monitoramento.' . PHP_EOL;
+      }
+      if ($fora['tipo_sem_site'] > 0) {
+        echo '  [INFO] ' . $fora['tipo_sem_site'] . ' domínio(s) de contrato sem tipo de serviço com site'
+          . ' (e-mail/gerenciamento de domínio).' . PHP_EOL;
+      }
+
+      foreach ($relatorio['linhas'] as $linha) {
+        if (empty($linha['eventos']) && $linha['ok']) continue;
+        $marca = $linha['ok'] ? '[OK]  ' : '[FORA]';
+        echo '  ' . $marca . ' ' . $linha['domain']
+          . ' (' . $linha['http_result'] . ' ' . $linha['http_status'] . ')'
+          . (empty($linha['eventos']) ? '' : ' -> ' . implode(', ', $linha['eventos'])) . PHP_EOL;
+      }
+
+      $totalChecados += $relatorio['checados'];
+      $totalEventos += $relatorio['eventos'];
+
+      if ($relatorio['abortada']) {
+        $mensagensDeErro[] = $rotulo . ': ' . $relatorio['motivo'];
+        echo '  [STOP] ' . $relatorio['motivo'] . PHP_EOL;
+        continue;
+      }
+
+      if ($relatorio['motivo'] !== '') echo '  [INFO] ' . $relatorio['motivo'] . PHP_EOL;
+
+      echo '  ' . $relatorio['checados'] . ' checado(s), ' . $relatorio['ok'] . ' no ar, '
+        . $relatorio['falhas'] . ' com falha, ' . $relatorio['eventos'] . ' evento(s).' . PHP_EOL;
+
+      // O resumo só é montado quando a rodada foi conclusiva — é o último degrau
+      // da proteção contra o e-mail com 300 falsos positivos.
+      try {
+        $resumo = $this->site_monitor_model->enviarResumo($empresa);
+        echo '  [MAIL] ' . $resumo['message'] . PHP_EOL;
+        if (!$resumo['enviado'] && $resumo['eventos'] > 0) $mensagensDeErro[] = $rotulo . ': ' . $resumo['message'];
+      } catch (Throwable $e) {
+        $mensagensDeErro[] = $rotulo . ' (resumo): ' . $e->getMessage();
+        echo '  [ERRO] Falha ao montar o resumo: ' . $e->getMessage() . PHP_EOL;
+        log_message('error', '[MONITOR] Falha ao montar o resumo — ' . $rotulo . ': ' . $e->getMessage());
+      }
+    }
+
+    $this->global_model->edit('crm_cron_logs', [
+      'modified' => date('Y-m-d H:i:s'),
+      'errors' => empty($mensagensDeErro) ? NULL : mb_substr(implode(' | ', $mensagensDeErro), 0, 5000),
+    ], 'name', 'cron_monitorar_sites');
+
+    $this->destravar($lockHandle);
+
+    echo "Concluído: {$totalChecados} domínio(s) checado(s), {$totalEventos} evento(s)." . PHP_EOL;
+  }
+
+  /**
+   * Lock de arquivo — uma rodada anterior ainda em andamento não pode ser
+   * atropelada pela próxima chamada do crontab.
+   *
+   * As guardas de configuração de cada rotina vêm ANTES desta chamada, de
+   * propósito: travar primeiro deixaria o arquivo preso em todo cenário de
+   * "rotina desativada" ou "não é CLI".
+   *
+   * @param  string $nome
+   * @return resource|bool FALSE quando já existe execução em andamento
+   */
+  private function travar($nome)
+  {
+    $lockFile = APPPATH . 'cache/' . $nome . '.lock';
+    $lockHandle = @fopen($lockFile, 'c');
+
+    if ($lockHandle === FALSE || !flock($lockHandle, LOCK_EX | LOCK_NB)) {
+      if (is_resource($lockHandle)) fclose($lockHandle);
+      echo "Já existe uma execução de {$nome} em andamento." . PHP_EOL;
+
+      // O echo sozinho vai para o stdout do cron, que ninguém lê. Numa rotina de
+      // vigilância, "a vigilância parou" é o alarme mais importante de todos, e é
+      // a tela de CRON que precisa mostrá-lo. UPDATE de uma linha, idempotente.
+      $this->global_model->edit('crm_cron_logs', [
+        'errors' => 'Execução anterior ainda em andamento em ' . date('d/m/Y H:i') . '; esta chamada não rodou.',
+      ], 'name', $nome);
+
+      return FALSE;
+    }
+
+    return $lockHandle;
+  }
+
+  /**
+   * @param resource $lockHandle
+   */
+  private function destravar($lockHandle)
+  {
+    if (!is_resource($lockHandle)) return;
+
+    flock($lockHandle, LOCK_UN);
+    fclose($lockHandle);
+  }
+
   /**
    * Corpo comum das duas rotinas de WHOIS.
    *

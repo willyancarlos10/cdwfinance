@@ -15,6 +15,12 @@ defined('BASEPATH') or exit('No direct script access allowed');
  */
 class Contratos extends MY_Controller
 {
+  /** Quantas contas pendentes o alerta da tela lista antes de resumir. */
+  const LIMITE_AVISO_SUSPENSAO = 8;
+
+  /** Cache do catálogo de motivos de encerramento (ver endReasons()). */
+  private $cacheEndReasons = NULL;
+
   public function __construct()
   {
     parent::__construct();
@@ -91,7 +97,10 @@ class Contratos extends MY_Controller
     $this->data['result'] = $this->carregarContrato($id);
 
     $this->data['cycles'] = $this->cycles();
+    // Todos para traduzir o rótulo do contrato já encerrado; só os ativos
+    // para o select do modal (ver endReasons()).
     $this->data['end_reasons'] = $this->endReasons();
+    $this->data['end_reasons_ativos'] = $this->endReasons(TRUE);
 
     $servicos = $this->global_model->getWhere_off('crm_contracts_services_v', ['id_contract' => $id], FALSE);
     $this->data['selected_services'] = array_map(function ($s) {
@@ -133,14 +142,629 @@ class Contratos extends MY_Controller
     $this->data['uso_gb'] = $usadoMb / 1024;
     $this->data['dominios_com_vinculo'] = $comVinculo;
 
-    // Aba Extrato financeiro: só uma leitura de banco (sem rede) — a aba
+    // Aba Extrato Bom Controle: só uma leitura de banco (sem rede) — a aba
     // mostra o aviso de integração desativada sem esperar o AJAX do extrato.
     $this->load->model('bomcontrole_model');
     $this->data['bomcontrole_ativo'] = $this->bomcontrole_model->isActive((int) $this->getCurrentCompanyId());
 
+    // Faturamento próprio
+    $this->load->model('invoice_model');
+    $this->load->model('adjustment_model');
+
+    $this->data['invoice_policies'] = $this->invoicePolicies();
+    $this->data['adjustment_indexes'] = $this->adjustmentIndexes();
+    // As faturas do contrato vivem na aba Faturas, carregadas por AJAX e
+    // paginadas (Contratos::json_postfaturas). Traziam-se todas aqui, sem
+    // limite: um contrato mensal antigo carregava dezenas de linhas em toda
+    // abertura da tela, para uma tabela que estava fora da dobra.
+    //
+    // As cobranças avulsas vêm direto: são poucas por contrato (uma venda
+    // pontual de cada vez), e o bloco fica ao lado do histórico de reajustes,
+    // que segue a mesma regra.
+    $this->load->model('charge_model');
+    $this->data['charges'] = $this->charge_model->listarPorContrato($id, (int) $this->getCurrentCompanyId());
+
+    // Teto de parcelas: no ciclo, o número de meses (parcela que passa disso
+    // invade a competência seguinte); na avulsa, o limite comercial do model.
+    $this->data['max_parcelas_ciclo'] = max(1, (int) $this->invoice_model->mesesDoCiclo((string) $this->data['result']->cycle));
+    $this->data['max_parcelas_avulsa'] = Charge_model::MAX_PARCELAS;
+
+    // Notificações do contrato. O repeater precisa de ao menos uma linha em
+    // branco para ter o que clonar, e o array vazio é o caso da maioria.
+    $this->data['notification_types'] = $this->notificationTypes();
+    $config = json_decode((string) $this->data['result']->notification_config, TRUE);
+    $this->data['notification_emails'] = (is_array($config) && !empty($config['emails'])) ? $config['emails'] : [];
+    $this->data['notification_whatsapps'] = (is_array($config) && !empty($config['whatsapps'])) ? $config['whatsapps'] : [];
+
+    $this->data['adjustments'] = $this->global_model->getWhereOrderBy_off(
+      'crm_contracts_adjustments_v',
+      ['id_contract' => $id],
+      'applied_at',
+      'desc',
+      FALSE
+    );
+
+    // Sugestões para quem ainda não configurou: dia de vencimento do parâmetro
+    // global e o próximo aniversário do contrato que ainda não passou.
+    $this->data['billing_day_sugerido'] = $this->invoice_model->diaPadrao();
+    $this->data['proximo_aniversario'] = $this->adjustment_model->proximoAniversario(
+      (string) $this->data['result']->created
+    );
+
     $this->load->view('header', $this->data);
     $this->load->view('contracts/info', $this->data);
     $this->load->view('footer', $this->data);
+  }
+
+  // ------------------------------------------------------------------
+  // Faturamento próprio
+  // ------------------------------------------------------------------
+
+  /**
+   * Política de emissão da nota fiscal.
+   *
+   * Slug e não booleano, como endReasons(): são três estados de negócio, e a
+   * pergunta seguinte ("quantos clientes emitem NF só depois de pagar") pede
+   * GROUP BY. `pos_compensacao` fica cadastrável desde já, mas só passa a ter
+   * efeito quando existir baixa de pagamento — sem saber que a fatura foi paga
+   * não há gatilho para emitir.
+   *
+   * @return array slug => rótulo
+   */
+  private function invoicePolicies()
+  {
+    return [
+      'nao_emitir' => 'Não emitir',
+      'com_boleto' => 'Emitir junto com o boleto',
+      'pos_compensacao' => 'Emitir após compensação',
+    ];
+  }
+
+  /**
+   * Tipos de destinatário das notificações do contrato.
+   *
+   * Mesmos slugs do `Form_model` do painel-v3, de onde veio o desenho do
+   * repeater: o código que um dia fizer o envio separa `to`/`cc`/`cco` por
+   * aqui, e usar o mesmo vocabulário evita traduzir de um lado para o outro.
+   *
+   * @return array slug => rótulo
+   */
+  private function notificationTypes()
+  {
+    return [
+      'destinatario' => 'Destinatário',
+      'copia' => 'Cópia',
+      'copia_oculta' => 'Cópia Oculta',
+    ];
+  }
+
+  /**
+   * Destinatários de notificação vindos do repeater, normalizados para o JSON
+   * de `crm_contracts.notification_config`.
+   *
+   * Nada aqui é obrigatório: os campos ainda não são lidos por ninguém, e
+   * exigir preenchimento travaria o SALVAR FATURAMENTO dos 403 contratos por
+   * uma configuração que não faz nada ainda.
+   *
+   * @param  array $post o array `notification` do POST
+   * @return array|bool FALSE quando algo é inválido (flashdata já definido)
+   */
+  private function montarNotificacoesDoPost(array $post)
+  {
+    $tipos = $this->notificationTypes();
+
+    $emails = [];
+    $vistos = [];
+    $temDestinatario = FALSE;
+
+    $linhas = isset($post['emails']) && is_array($post['emails']) ? $post['emails'] : [];
+
+    foreach ($linhas as $linha) {
+      $email = mb_strtolower(trim((string) (isset($linha['email']) ? $linha['email'] : '')));
+
+      // Linha em branco é o estado natural do repeater (o usuário clicou em
+      // "adicionar" e desistiu): some em silêncio, não vira erro.
+      if ($email === '') continue;
+
+      if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        $this->session->set_flashdata('warning', 'E-mail de notificação inválido: ' . $email);
+        return FALSE;
+      }
+
+      // O mesmo e-mail duas vezes é a mesma pessoa recebendo duas cópias.
+      if (isset($vistos[$email])) continue;
+      $vistos[$email] = TRUE;
+
+      $tipo = (string) (isset($linha['type']) ? $linha['type'] : '');
+      if (!array_key_exists($tipo, $tipos)) $tipo = 'destinatario';
+      if ($tipo === 'destinatario') $temDestinatario = TRUE;
+
+      $emails[] = ['email' => mb_substr($email, 0, 190), 'type' => $tipo];
+    }
+
+    // Lista só de cópia não tem para quem mandar: o "para" de um e-mail não
+    // pode ficar vazio, e o servidor de e-mail recusaria o envio.
+    if (!empty($emails) && !$temDestinatario) {
+      $this->session->set_flashdata('warning', 'Marque ao menos um e-mail como "Destinatário" — uma lista só de cópias não tem para quem enviar.');
+      return FALSE;
+    }
+
+    $whatsapps = [];
+    $vistosFone = [];
+
+    $linhas = isset($post['whatsapps']) && is_array($post['whatsapps']) ? $post['whatsapps'] : [];
+
+    foreach ($linhas as $linha) {
+      $fone = preg_replace('/\D/', '', (string) (isset($linha['phone']) ? $linha['phone'] : ''));
+      if ($fone === '') continue;
+
+      // 10 = fixo com DDD; 13 = 55 + DDD + 9 dígitos. Fora disso não há número
+      // de WhatsApp possível, e guardar lixo aqui só adia a descoberta.
+      if (strlen($fone) < 10 || strlen($fone) > 13) {
+        $this->session->set_flashdata('warning', 'Telefone de WhatsApp inválido: ' . $fone);
+        return FALSE;
+      }
+
+      if (isset($vistosFone[$fone])) continue;
+      $vistosFone[$fone] = TRUE;
+
+      $whatsapps[] = ['phone' => $fone];
+    }
+
+    // Sem nada configurado a coluna fica NULL, e não com um JSON de listas
+    // vazias: assim "não configurado" se distingue de "configurado e limpo"
+    // numa consulta simples.
+    if (empty($emails) && empty($whatsapps)) return NULL;
+
+    return json_encode(
+      ['emails' => $emails, 'whatsapps' => $whatsapps],
+      JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    );
+  }
+  /**
+   * Índices de reajuste. `nenhum` é a ausência de reajuste, e por isso encabeça
+   * a lista e é o default da coluna.
+   *
+   * @return array slug => rótulo
+   */
+  private function adjustmentIndexes()
+  {
+    return ['nenhum' => 'Sem reajuste'] + $this->adjustmentIndexesCatalogo();
+  }
+
+  /**
+   * Só os índices de verdade — o catálogo que o Adjustment_model conhece.
+   *
+   * @return array slug => rótulo
+   */
+  private function adjustmentIndexesCatalogo()
+  {
+    $this->load->model('adjustment_model');
+    return $this->adjustment_model->indexes();
+  }
+
+  /**
+   * Grava a configuração de faturamento do contrato.
+   *
+   * É o ponto onde um contrato deixa de ser cobrado pelo Bom Controle e passa
+   * a ser faturado aqui — daí as guardas serem tão explícitas.
+   */
+  public function post_faturamento()
+  {
+    $id = (int) $this->input->post('id');
+    $contrato = $this->carregarContratoDaTabela($id);
+
+    if ((string) $contrato->status === 'encerrado') {
+      $this->session->set_flashdata('warning', 'Contrato encerrado não tem faturamento a configurar.');
+      redirect(base_url('contratos/info?id=' . $id));
+    }
+
+    $post = (array) $this->input->post('billing');
+    $campo = function ($chave) use ($post) {
+      return isset($post[$chave]) ? trim((string) $post[$chave]) : '';
+    };
+
+    $origem = $campo('billing_source') === 'cdwfinance' ? 'cdwfinance' : 'bomcontrole';
+
+    $politica = $campo('invoice_policy');
+    if (!array_key_exists($politica, $this->invoicePolicies())) {
+      $this->session->set_flashdata('warning', 'Política de nota fiscal inválida.');
+      redirect(base_url('contratos/info?id=' . $id));
+    }
+
+    $indice = $campo('adjustment_index');
+    if (!array_key_exists($indice, $this->adjustmentIndexes())) {
+      $this->session->set_flashdata('warning', 'Índice de reajuste inválido.');
+      redirect(base_url('contratos/info?id=' . $id));
+    }
+
+    // Destinatários de notificação: gravados sempre, inclusive quando o
+    // faturamento é do Bom Controle. Quem avisa o cliente sobre este
+    // contrato é pergunta independente de quem emite a cobrança, e
+    // apagar a lista ao virar a chave perderia cadastro sem ninguém pedir.
+    $notificacoes = $this->montarNotificacoesDoPost((array) $this->input->post('notification'));
+    if ($notificacoes === FALSE) {
+      redirect(base_url('contratos/info?id=' . $id));
+    }
+
+    $dados = [
+      'billing_source' => $origem,
+      'invoice_policy' => $politica,
+      'adjustment_index' => $indice,
+      'notification_config' => $notificacoes,
+      'modified' => date('Y-m-d H:i:s'),
+      'modified_by' => (int) $this->session->userdata('user')->id,
+    ];
+
+    if ($origem === 'cdwfinance') {
+      $resultado = $this->montarFaturamentoAtivo($contrato, $post, $indice);
+      if ($resultado === FALSE) {
+        redirect(base_url('contratos/info?id=' . $id));
+      }
+      $dados = array_merge($dados, $resultado);
+    } else {
+      // Voltando para o ERP: as âncoras são zeradas para o motor daqui parar de
+      // enxergar o contrato. Sem isso, desligar e religar retomaria de uma
+      // competência antiga e geraria faturas retroativas sem que ninguém pedisse.
+      $dados['next_competence'] = NULL;
+      $dados['next_adjustment'] = NULL;
+      $dados['adjustment_notified_for'] = NULL;
+    }
+
+    if ($indice === 'nenhum') {
+      $dados['next_adjustment'] = NULL;
+      $dados['adjustment_notified_for'] = NULL;
+    }
+
+    $this->global_model->edit('crm_contracts', $dados, 'id', $id);
+
+    $this->session->set_flashdata('success', 'Configuração de faturamento salva.');
+    redirect(base_url('contratos/info?id=' . $id));
+  }
+
+  /**
+   * Valida e monta os campos exigidos quando o faturamento passa a ser daqui.
+   *
+   * @param  object $contrato
+   * @param  array  $post
+   * @param  string $indice
+   * @return array|bool FALSE quando algo é inválido (flashdata já definido)
+   */
+  private function montarFaturamentoAtivo($contrato, array $post, $indice)
+  {
+    $campo = function ($chave) use ($post) {
+      return isset($post[$chave]) ? trim((string) $post[$chave]) : '';
+    };
+
+    // O contrato ainda cobrado no ERP é o caso perigoso: ligar aqui sem
+    // encerrar lá cobra o cliente duas vezes. Enquanto o encerramento
+    // automático não existe (depende da API), a confirmação é o degrau.
+    $jaEraDaqui = ((string) $contrato->billing_source === 'cdwfinance');
+    if (!$jaEraDaqui && !empty($contrato->bomcontrole_contract_id) && $campo('confirma_erp') !== '1') {
+      $this->session->set_flashdata('warning', 'Este contrato ainda está vinculado ao contrato #' . (int) $contrato->bomcontrole_contract_id . ' do Bom Controle. Encerre-o por lá antes de faturar pelo CDW Finance e marque a confirmação — sem isso o cliente seria cobrado duas vezes.');
+      return FALSE;
+    }
+
+    $dia = (int) $campo('billing_day');
+    if ($dia < 1 || $dia > 31) {
+      $this->session->set_flashdata('warning', 'Informe o dia de vencimento (de 1 a 31).');
+      return FALSE;
+    }
+
+    $this->load->model('invoice_model');
+
+    // Conferência estrita, no mesmo padrão da data de criação do contrato e do
+    // vencimento de domínio: `databanco()` não serve aqui porque devolve
+    // 1970-01-01 para qualquer lixo, e um campo em branco viraria uma
+    // competência de 1970 — que o motor tentaria faturar mês a mês até hoje.
+    $competencia = $this->dataDoPost($campo('next_competence'), 'a competência inicial');
+    if ($competencia === FALSE) return FALSE;
+
+    // Parcela que passa do ciclo invadiria a competência seguinte: um mensal
+    // em 2× teria a parcela 2 vencendo no mês da competência seguinte, que por
+    // sua vez traria a sua parcela 1 — sobreposição que só cresce. Mensal só
+    // aceita 1.
+    $mesesDoCiclo = $this->invoice_model->mesesDoCiclo((string) $contrato->cycle);
+    $parcelas = (int) $campo('installments');
+    if ($parcelas < 1) $parcelas = 1;
+
+    if ($mesesDoCiclo > 0 && $parcelas > $mesesDoCiclo) {
+      $rotulos = $this->cycles();
+      $rotulo = isset($rotulos[(string) $contrato->cycle]) ? mb_strtolower($rotulos[(string) $contrato->cycle]) : (string) $contrato->cycle;
+      $this->session->set_flashdata('warning', 'Um contrato ' . $rotulo . ' aceita no máximo ' . $mesesDoCiclo . ' parcela(s) por competência.');
+      return FALSE;
+    }
+
+    $dados = [
+      'billing_day' => $dia,
+      'next_competence' => substr($competencia, 0, 8) . '01',
+      'installments' => $parcelas,
+    ];
+
+    if ($indice !== 'nenhum') {
+      $reajuste = $this->dataDoPost($campo('next_adjustment'), 'a data do próximo reajuste');
+      if ($reajuste === FALSE) return FALSE;
+      $dados['next_adjustment'] = $reajuste;
+    }
+
+    return $dados;
+  }
+
+  /**
+   * Data dd/mm/aaaa do formulário → Y-m-d, com conferência estrita.
+   *
+   * @param  string $texto
+   * @param  string $rotulo usado na mensagem de erro
+   * @return string|bool FALSE quando inválida (flashdata já definido)
+   */
+  private function dataDoPost($texto, $rotulo)
+  {
+    $texto = trim((string) $texto);
+
+    if ($texto === '') {
+      $this->session->set_flashdata('warning', 'Informe ' . $rotulo . ' no formato dd/mm/aaaa.');
+      return FALSE;
+    }
+
+    $data = DateTime::createFromFormat('d/m/Y', $texto);
+    if (!$data || $data->format('d/m/Y') !== $texto) {
+      $this->session->set_flashdata('warning', 'Informe ' . $rotulo . ' no formato dd/mm/aaaa.');
+      return FALSE;
+    }
+
+    if ((int) $data->format('Y') < 2000) {
+      $this->session->set_flashdata('warning', 'Informe ' . $rotulo . ' a partir do ano 2000.');
+      return FALSE;
+    }
+
+    return $data->format('Y-m-d');
+  }
+
+  /**
+   * Gera a fatura da competência corrente sob demanda.
+   */
+  /**
+   * Lança uma cobrança avulsa parcelada no contrato.
+   *
+   * Ao contrário da recorrência, as parcelas nascem AQUI, no ato: a obrigação
+   * inteira já existe e não há competência futura a acompanhar. Quem valida e
+   * grava é o Charge_model — este método só resolve o escopo e traduz o
+   * formulário.
+   */
+  public function post_lancarcobranca()
+  {
+    $id = (int) $this->input->post('id');
+    $contrato = $this->carregarContratoDaTabela($id);
+
+    $post = (array) $this->input->post('charge');
+    $campo = function ($chave) use ($post) {
+      return isset($post[$chave]) ? trim((string) $post[$chave]) : '';
+    };
+
+    // Data pela conferência estrita de sempre — `databanco()` devolveria
+    // 1970-01-01 para lixo, e a cobrança nasceria vencida há 56 anos.
+    $vencimento = $this->dataDoPost($campo('due_date'), 'a data do primeiro vencimento');
+    if ($vencimento === FALSE) {
+      redirect(base_url('contratos/info?id=' . $id));
+    }
+
+    $politica = $campo('invoice_policy');
+    if (!array_key_exists($politica, $this->invoicePolicies())) {
+      $politica = (string) $contrato->invoice_policy;
+    }
+
+    $this->load->model('charge_model');
+
+    $resultado = $this->charge_model->lancar($id, (int) $this->getCurrentCompanyId(), (int) $this->session->userdata('user')->id, [
+      'description' => $campo('description'),
+      'value' => (float) removerFormatacaoNumero($campo('value')),
+      'installments' => (int) $campo('installments'),
+      'due_date' => $vencimento,
+      'invoice_policy' => $politica,
+      'comments' => $campo('comments'),
+    ]);
+
+    $this->session->set_flashdata(
+      $resultado['success'] ? 'success' : 'warning',
+      $resultado['success'] ? 'Cobrança lançada — ' . $resultado['message'] : $resultado['message']
+    );
+
+    redirect(base_url('contratos/info?id=' . $id));
+  }
+
+  /**
+   * Cancela a cobrança e as parcelas ainda abertas.
+   *
+   * Não há exclusão: cobrança é registro financeiro, como a fatura. É isso que
+   * permite a sentinela `id_charge = 0` viver sem FK — a linha apontada nunca
+   * desaparece.
+   */
+  public function post_cancelarcobranca()
+  {
+    $id = (int) $this->input->post('id');
+    $this->carregarContratoDaTabela($id);
+
+    $this->load->model('charge_model');
+
+    $resultado = $this->charge_model->cancelar(
+      (int) $this->input->post('id_charge'),
+      (int) $this->getCurrentCompanyId(),
+      (int) $this->session->userdata('user')->id
+    );
+
+    $this->session->set_flashdata($resultado['success'] ? 'success' : 'warning', $resultado['message']);
+    redirect(base_url('contratos/info?id=' . $id));
+  }
+
+  public function json_postgerarfatura()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $id = (int) $this->input->post('id');
+    if ($id <= 0) {
+      echo json_encode($this->jsonErro('ID inválido.', ['id' => 'ID inválido.']));
+      return;
+    }
+
+    $this->load->model('invoice_model');
+    $resultado = $this->invoice_model->generateNow(
+      $id,
+      (int) $this->getCurrentCompanyId(),
+      (int) $this->session->userdata('user')->id
+    );
+
+    $geradas = (int) $resultado['data']['geradas'];
+    $mensagem = $resultado['success']
+      ? ($geradas > 0 ? $geradas . ' fatura(s) gerada(s).' : 'Nenhuma competência pendente — as faturas deste contrato já foram geradas.')
+      : $resultado['message'];
+
+    echo json_encode([
+      'success' => (bool) $resultado['success'],
+      'return' => (bool) $resultado['success'],
+      'message' => $mensagem,
+      'data' => $resultado['data'],
+      'errors' => $resultado['success'] ? [] : ['faturamento' => $resultado['message']],
+    ]);
+  }
+
+  /**
+   * Busca no catálogo de serviços do Bom Controle.
+   *
+   * Sob demanda, a partir do termo digitado: o rate limit do ERP não tolera
+   * varrer o catálogo (119 serviços) a cada abertura do modal.
+   */
+  public function json_postbuscarservicobc()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $id = (int) $this->input->post('id');
+    if ($id <= 0) {
+      echo json_encode($this->jsonErro('ID inválido.', ['id' => 'ID inválido.']));
+      return;
+    }
+
+    @set_time_limit(0);
+
+    $this->load->model('bomcontrole_model');
+    $resultado = $this->bomcontrole_model->buscarServicos(
+      (int) $this->getCurrentCompanyId(),
+      (string) $this->input->post('termo')
+    );
+
+    echo json_encode([
+      'success' => (bool) $resultado['success'],
+      'return' => (bool) $resultado['success'],
+      'message' => $resultado['message'],
+      'data' => $resultado['data'],
+      'errors' => $resultado['success'] ? [] : ['bomcontrole' => $resultado['message']],
+    ]);
+  }
+
+  /**
+   * Vincula o serviço do ERP ao contrato — é o `Servicos[].IdServico` que a
+   * emissão da cobrança vai usar.
+   *
+   * O id do POST é revalidado no servidor (`Servico/Obter`) antes de gravar.
+   */
+  public function json_postvincularservicobc()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $id = (int) $this->input->post('id');
+    if ($id <= 0) {
+      echo json_encode($this->jsonErro('ID inválido.', ['id' => 'ID inválido.']));
+      return;
+    }
+
+    @set_time_limit(0);
+
+    $this->load->model('bomcontrole_model');
+    $resultado = $this->bomcontrole_model->vincularServico(
+      $id,
+      (int) $this->getCurrentCompanyId(),
+      (int) $this->input->post('id_servico'),
+      (int) $this->session->userdata('user')->id
+    );
+
+    echo json_encode([
+      'success' => (bool) $resultado['success'],
+      'return' => (bool) $resultado['success'],
+      'message' => $resultado['message'],
+      'data' => $resultado['data'],
+      'errors' => $resultado['success'] ? [] : ['bomcontrole' => $resultado['message']],
+    ]);
+  }
+
+  /**
+   * Remove o vínculo do serviço. Não altera nada no ERP.
+   */
+  public function json_postdesvincularservicobc()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $id = (int) $this->input->post('id');
+    if ($id <= 0) {
+      echo json_encode($this->jsonErro('ID inválido.', ['id' => 'ID inválido.']));
+      return;
+    }
+
+    $this->load->model('bomcontrole_model');
+    $resultado = $this->bomcontrole_model->desvincularServico(
+      $id,
+      (int) $this->getCurrentCompanyId(),
+      (int) $this->session->userdata('user')->id
+    );
+
+    echo json_encode([
+      'success' => (bool) $resultado['success'],
+      'return' => (bool) $resultado['success'],
+      'message' => $resultado['message'],
+      'data' => $resultado['data'],
+      'errors' => $resultado['success'] ? [] : ['bomcontrole' => $resultado['message']],
+    ]);
+  }
+
+  /**
+   * Envia (ou reenvia) o aviso de reajuste ao cliente.
+   */
+  public function json_postavisarreajuste()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $id = (int) $this->input->post('id');
+    if ($id <= 0) {
+      echo json_encode($this->jsonErro('ID inválido.', ['id' => 'ID inválido.']));
+      return;
+    }
+
+    $contrato = $this->global_model->getWhere_off('crm_contracts', [
+      'id' => $id,
+      'id_company' => (int) $this->getCurrentCompanyId(),
+    ], TRUE);
+
+    if (empty($contrato)) {
+      echo json_encode($this->jsonErro('Contrato não encontrado.'));
+      return;
+    }
+
+    if ((string) $contrato->adjustment_index === 'nenhum' || empty($contrato->next_adjustment)) {
+      echo json_encode($this->jsonErro('Este contrato não tem reajuste configurado.'));
+      return;
+    }
+
+    $this->load->model('adjustment_model');
+    $resultado = $this->adjustment_model->notifyContract(
+      $contrato,
+      (int) $this->session->userdata('user')->id
+    );
+
+    echo json_encode([
+      'success' => (bool) $resultado['success'],
+      'return' => (bool) $resultado['success'],
+      'message' => $resultado['message'],
+      'data' => $resultado['data'],
+      'errors' => $resultado['success'] ? [] : ['reajuste' => $resultado['message']],
+    ]);
   }
 
   public function post_salvar()
@@ -211,6 +835,12 @@ class Contratos extends MY_Controller
    *
    * Com a tabela de transições, qualquer status futuro cai no erro em vez de
    * virar 'vigente' por descuido.
+   *
+   * A parada do serviço acompanha a parada do contrato: SUSPENDER suspende nos
+   * painéis as contas dos domínios vinculados e REATIVAR devolve. O status
+   * local muda de qualquer jeito — painel fora do ar não pode impedir o
+   * financeiro de registrar a suspensão —, e o que não foi aplicado é listado
+   * na tela para o operador resolver no painel.
    */
   public function post_status()
   {
@@ -232,13 +862,30 @@ class Contratos extends MY_Controller
       redirect(base_url('contratos/info?id=' . $id));
     }
 
+    // Rede antes do banco: o status só é gravado depois de tentar o painel, e o
+    // laço pode levar segundos por conta (ver Server_model).
+    @set_time_limit(0);
+    $this->load->model('server_model');
+    $suspensao = $this->server_model->suspendContractAccounts(
+      $id,
+      (int) $this->getCurrentCompanyId(),
+      $acao,
+      (int) $this->session->userdata('user')->id
+    );
+
     $this->global_model->edit('crm_contracts', [
       'status' => $transicoes[$acao]['para'],
       'modified' => date('Y-m-d H:i:s'),
       'modified_by' => (int) $this->session->userdata('user')->id,
     ], 'id', $id);
 
-    $this->session->set_flashdata('success', $transicoes[$acao]['ok']);
+    $this->session->set_flashdata('success', $transicoes[$acao]['ok'] . $this->resumoSuspensao($suspensao));
+
+    $aviso = $this->avisoSuspensao($suspensao);
+    if ($aviso !== '') {
+      $this->session->set_flashdata('warning', $aviso);
+    }
+
     redirect(base_url('contratos/info?id=' . $id));
   }
 
@@ -249,6 +896,20 @@ class Contratos extends MY_Controller
    * Funciona a partir de vigente E de suspenso: suspender por inadimplência e
    * depois encerrar é o caminho mais comum, e exigir a reativação antes faria o
    * contrato aparecer como vigente no meio do caminho.
+   *
+   * Encerrar faz o mesmo que suspender nos painéis (as contas dos domínios
+   * vinculados são suspensas) e, para cada conta que o painel confirmou,
+   * DESVINCULA o domínio: a linha continua no contrato, com o histórico do que
+   * foi contratado, mas a conta do servidor volta a ser "órfã" — sem contrato,
+   * ela aparece no card de domínios do Dashboard como pendência de destino, que
+   * é o que ela de fato passou a ser.
+   *
+   * O desvínculo é por conta, e não do contrato inteiro: o que não pôde ser
+   * suspenso continua vinculado, tanto para não sumir da tela quanto para a
+   * operação poder ser retomada (reabrir → encerrar de novo processa só o que
+   * sobrou). REABRIR não reativa nada, justamente porque o vínculo das contas
+   * já aplicadas não existe mais — encerramento é caminho de ida para o
+   * serviço, e cliente que volta gera contrato novo.
    */
   public function post_encerrar()
   {
@@ -264,24 +925,81 @@ class Contratos extends MY_Controller
     }
 
     $motivo = trim((string) $this->input->post('reason'));
-    if (!array_key_exists($motivo, $this->endReasons())) {
+    if (!array_key_exists($motivo, $this->endReasons(TRUE))) {
       $this->session->set_flashdata('error', 'Selecione um motivo de encerramento válido.');
       redirect(base_url('contratos/info?id=' . $id));
     }
 
     $observacoes = trim((string) $this->input->post('comments'));
 
+    $idCompany = (int) $this->getCurrentCompanyId();
+    $idUser = (int) $this->session->userdata('user')->id;
+
+    @set_time_limit(0);
+    $this->load->model('server_model');
+    $suspensao = $this->server_model->suspendContractAccounts(
+      $id,
+      $idCompany,
+      'suspender',
+      $idUser,
+      'Contrato #' . $id . ' encerrado no CDW Finance'
+    );
+
+    $agora = date('Y-m-d H:i:s');
+    $desvincular = array_map('intval', $suspensao['ids_contract_domains']);
+
+    $this->db->trans_begin();
+
     $this->global_model->edit('crm_contracts', [
       'status' => 'encerrado',
-      'ended' => date('Y-m-d H:i:s'),
+      'ended' => $agora,
       'ended_reason' => $motivo,
-      'ended_comments' => ($observacoes !== '') ? mb_substr($observacoes, 0, 500) : NULL,
-      'ended_by' => (int) $this->session->userdata('user')->id,
-      'modified' => date('Y-m-d H:i:s'),
-      'modified_by' => (int) $this->session->userdata('user')->id,
+      // 300 é o teto da coluna desde a 032; cortar aqui evita o erro seco do
+      // MySQL e mantém banco, POST e textarea com o mesmo limite.
+      'ended_comments' => ($observacoes !== '') ? mb_substr($observacoes, 0, 300) : NULL,
+      'ended_by' => $idUser,
+      'modified' => $agora,
+      'modified_by' => $idUser,
     ], 'id', $id);
 
-    $this->session->set_flashdata('success', 'Contrato encerrado.');
+    if (!empty($desvincular)) {
+      $placeholders = implode(', ', array_fill(0, count($desvincular), '?'));
+      $this->db->query(
+        'UPDATE `crm_contracts_domains`
+            SET `id_server_domain` = NULL, `modified` = ?, `modified_by` = ?
+          WHERE `id_contract` = ? AND `id_company` = ? AND `id` IN (' . $placeholders . ')',
+        array_merge([$agora, $idUser, $id, $idCompany], $desvincular)
+      );
+    }
+
+    if ($this->db->trans_status() === FALSE) {
+      $this->db->trans_rollback();
+
+      // As contas já foram suspensas — isso não volta atrás com um rollback, e
+      // o log é o que liga o contrato ainda vigente na tela às contas fora do
+      // ar no painel.
+      log_message('error', '[SUSPENSAO] Encerramento não gravado após suspender contas — tenant ' . $idCompany
+        . ', contrato ' . $id . ', contas suspensas: ' . (int) $suspensao['contas_ok']);
+
+      $this->session->set_flashdata('error', 'Não foi possível gravar o encerramento do contrato.'
+        . ((int) $suspensao['contas_ok'] > 0
+          ? ' Atenção: ' . (int) $suspensao['contas_ok'] . ' conta(s) já haviam sido suspensas no painel.'
+          : ''));
+      redirect(base_url('contratos/info?id=' . $id));
+    }
+    $this->db->trans_commit();
+
+    $mensagem = 'Contrato encerrado.' . $this->resumoSuspensao($suspensao);
+    if (!empty($desvincular)) {
+      $mensagem .= ' ' . count($desvincular) . ' domínio(s) desvinculado(s) da conta de servidor.';
+    }
+    $this->session->set_flashdata('success', $mensagem);
+
+    $aviso = $this->avisoSuspensao($suspensao);
+    if ($aviso !== '') {
+      $this->session->set_flashdata('warning', $aviso);
+    }
+
     redirect(base_url('contratos/info?id=' . $id));
   }
 
@@ -321,6 +1039,105 @@ class Contratos extends MY_Controller
 
     $this->session->set_flashdata('success', 'Contrato reaberto. O registro do encerramento foi apagado.');
     redirect(base_url('contratos/info?id=' . $id));
+  }
+
+  // ------------------------------------------------------------------
+  // Mensagens da suspensão de contas (Server_model::suspendContractAccounts)
+  // ------------------------------------------------------------------
+
+  /**
+   * Trecho somado à mensagem de sucesso: o que de fato aconteceu nos painéis.
+   *
+   * Domínio sem vínculo entra aqui, e não no aviso: cadastrar domínio sem
+   * correspondência no servidor é estado normal, então tratá-lo como problema
+   * encheria a tela de alerta a cada encerramento.
+   *
+   * @param  array $resultado
+   * @return string
+   */
+  private function resumoSuspensao(array $resultado)
+  {
+    $partes = [];
+
+    if ((int) $resultado['contas_ok'] > 0) {
+      $partes[] = (int) $resultado['contas_ok'] . ' conta(s) '
+        . ($resultado['acao'] === 'suspender' ? 'suspensa(s)' : 'reativada(s)') . ' no painel';
+    }
+
+    $semVinculo = count($resultado['sem_vinculo']);
+    if ($semVinculo > 0) {
+      $partes[] = $semVinculo . ' domínio(s) sem vínculo com servidor (nada a aplicar)';
+    }
+
+    return empty($partes) ? '' : ' ' . implode('; ', $partes) . '.';
+  }
+
+  /**
+   * Lista o que ficou pendente nos painéis, para o alerta da tela.
+   *
+   * Contas bloqueadas e falhas aparecem juntas porque a pergunta do operador é
+   * uma só ("o que eu ainda preciso fazer no painel?"), mas o motivo de cada
+   * uma vem escrito — conta compartilhada com contrato vigente é decisão do
+   * sistema, e não erro de rede.
+   *
+   * @param  array $resultado
+   * @return string vazio quando não há nada a avisar
+   */
+  private function avisoSuspensao(array $resultado)
+  {
+    $itens = [];
+
+    foreach ($resultado['bloqueados'] as $bloqueado) {
+      $itens[] = '<strong>' . $this->textoParaFlash($bloqueado['servidor'] . ' — ' . $bloqueado['conta'])
+        . '</strong>: ' . $this->textoParaFlash($bloqueado['motivo']);
+    }
+
+    foreach ($resultado['falhas'] as $falha) {
+      $itens[] = '<strong>' . $this->textoParaFlash($falha['servidor'] . ' — ' . $falha['conta'])
+        . '</strong>: ' . $this->textoParaFlash($falha['erro']);
+    }
+
+    $pendentes = [];
+    if (!empty($itens)) {
+      // A lista é truncada: um contrato com dezenas de contas transformaria o
+      // alerta numa parede de texto que ninguém lê. O log tem todas.
+      $total = count($itens);
+      if ($total > self::LIMITE_AVISO_SUSPENSAO) {
+        $itens = array_slice($itens, 0, self::LIMITE_AVISO_SUSPENSAO);
+        $itens[] = 'e mais ' . ($total - self::LIMITE_AVISO_SUSPENSAO) . ' — veja o log do sistema.';
+      }
+
+      $pendentes[] = 'Estas contas <strong>não</strong> foram '
+        . ($resultado['acao'] === 'suspender' ? 'suspensas' : 'reativadas')
+        . ' — resolva pelo painel do servidor:<br>&bull; ' . implode('<br>&bull; ', $itens);
+    }
+
+    if ((int) $resultado['nao_processadas'] > 0) {
+      $pendentes[] = (int) $resultado['nao_processadas'] . ' conta(s) não foram processadas nesta tentativa '
+        . '(tempo limite da requisição). Repita a operação para continuar de onde parou.';
+    }
+
+    return empty($pendentes) ? '' : implode('<br><br>', $pendentes);
+  }
+
+  /**
+   * Prepara texto vindo de fora (mensagem de painel) para o flashdata.
+   *
+   * O header injeta a mensagem dentro de uma string JavaScript entre aspas
+   * duplas, sem escapar: aspas, barra invertida ou quebra de linha vindas da
+   * resposta de um painel quebrariam o script e o alerta simplesmente não
+   * apareceria — justamente no caso em que ele mais importa.
+   *
+   * @param  string $texto
+   * @return string
+   */
+  private function textoParaFlash($texto)
+  {
+    $limpo = strip_tags((string) $texto);
+    $limpo = str_replace(['\\', '"'], ['/', "'"], $limpo);
+    $limpo = preg_replace('/\s+/u', ' ', $limpo);
+
+    return trim(mb_substr((string) $limpo, 0, 300));
   }
 
   public function post_excluir()
@@ -875,6 +1692,21 @@ class Contratos extends MY_Controller
       return FALSE;
     }
 
+    // A guarda "parcelas <= meses do ciclo" também vale aqui: encurtar o ciclo
+    // de anual para mensal num contrato em 2× deixaria a parcela 2 vencendo
+    // dentro da competência seguinte. Sem esta checagem, a regra do bloco
+    // Faturamento seria burlada pela porta dos dados gerais.
+    if (!empty($contratoAtual) && (int) $contratoAtual->installments > 1) {
+      $this->load->model('invoice_model');
+      $meses = $this->invoice_model->mesesDoCiclo($ciclo);
+
+      if ($meses > 0 && (int) $contratoAtual->installments > $meses) {
+        $rotulos = $this->cycles();
+        $this->session->set_flashdata('error', 'Este contrato está dividido em ' . (int) $contratoAtual->installments . ' parcelas, e o ciclo ' . mb_strtolower($rotulos[$ciclo]) . ' comporta no máximo ' . $meses . '. Ajuste as parcelas no bloco Faturamento antes de mudar o ciclo.');
+        return FALSE;
+      }
+    }
+
     $valor = (float) removerFormatacaoNumero(isset($post['value']) ? (string) $post['value'] : '');
     if ($valor < 0) $valor = 0;
 
@@ -987,28 +1819,44 @@ class Contratos extends MY_Controller
 
   /**
    * Catálogo de motivos de encerramento (slug gravado em
-   * crm_contracts.ended_reason).
+   * crm_contracts.ended_reason), lido de `crm_end_reasons` desde a migration
+   * 032 — antes era um array aqui dentro.
    *
    * Slug, e não texto livre, porque a pergunta seguinte do negócio é "por que
-   * perdemos" — e isso pede GROUP BY.
+   * perdemos" — e isso pede GROUP BY. O slug continua sendo o que o contrato
+   * grava: a tabela é o catálogo, não o dono do carimbo histórico.
+   *
+   * Dois recortes, e a diferença importa:
+   *  - SEM `$somenteAtivos` devolve TUDO, e é o que traduz slug → rótulo na
+   *    tela do contrato. Motivo inativado depois não pode apagar o rótulo de um
+   *    contrato que já foi encerrado com ele.
+   *  - COM `$somenteAtivos` é o que alimenta o select do modal e valida o POST
+   *    do encerramento — motivo aposentado não volta pela porta dos fundos.
+   *
+   * A leitura é memoizada porque `info()` chama as duas versões na mesma
+   * requisição.
    *
    * Diferente do cycles(), NÃO é espelhado em Clientes.php: o contrato nasce no
    * modal da tela do cliente, mas o encerramento só acontece na tela do
    * contrato.
    *
+   * @param  bool $somenteAtivos
    * @return array slug => rótulo
    */
-  private function endReasons()
+  private function endReasons($somenteAtivos = FALSE)
   {
-    return [
-      'cancelamento' => 'Cancelamento pelo cliente',
-      'inadimplencia' => 'Inadimplência',
-      'concorrente' => 'Migração para concorrente',
-      'fim_atividades' => 'Encerramento das atividades do cliente',
-      'fim_prazo' => 'Fim do prazo contratual',
-      'substituicao' => 'Substituído por outro contrato',
-      'outros' => 'Outros',
-    ];
+    if ($this->cacheEndReasons === NULL) {
+      $this->cacheEndReasons = $this->db->query(
+        'SELECT `slug`, `name`, `id_status` FROM `crm_end_reasons` ORDER BY `sort_order` ASC, `name` ASC'
+      )->result();
+    }
+
+    $saida = [];
+    foreach ($this->cacheEndReasons as $motivo) {
+      if ($somenteAtivos && (int) $motivo->id_status !== 1) continue;
+      $saida[$motivo->slug] = $motivo->name;
+    }
+    return $saida;
   }
 
   /**
@@ -1070,7 +1918,7 @@ class Contratos extends MY_Controller
   }
 
   /**
-   * Extrato financeiro do contrato, consultado ao vivo no Bom Controle.
+   * Extrato Bom Controle do contrato, consultado ao vivo no ERP.
    */
   public function json_postextratobc()
   {
@@ -1250,5 +2098,61 @@ class Contratos extends MY_Controller
       'data' => NULL,
       'errors' => $errors,
     ];
+  }
+
+  /**
+   * Uma página das faturas geradas pelo CDW Finance para este contrato.
+   *
+   * Só banco, sem rede — ao contrário do extrato do Bom Controle, estas
+   * faturas são nossas. É por isso que a aba pagina de verdade e o extrato
+   * não: lá o recorte é fixo (vencidas + 60 dias + 13 meses de pagas) e vem
+   * pronto da API; aqui a série cresce um registro por competência, para
+   * sempre.
+   */
+  public function json_postfaturas()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $id = (int) $this->input->post('id');
+    if ($id <= 0) {
+      echo json_encode($this->jsonErro('ID inválido.', ['id' => 'ID inválido.']));
+      return;
+    }
+
+    // Escopo conferido aqui, e não no model: o id vem do POST e sozinho
+    // atravessaria tenants. Sem redirect — quem chama é AJAX.
+    $contrato = $this->global_model->getWhere_off('crm_contracts', [
+      'id' => $id,
+      'id_company' => (int) $this->getCurrentCompanyId(),
+    ], TRUE);
+
+    if (empty($contrato)) {
+      echo json_encode($this->jsonErro('Contrato não encontrado.'));
+      return;
+    }
+
+    $this->load->model('invoice_model');
+    $pagina = $this->invoice_model->listarPorEscopo(
+      'contrato',
+      $id,
+      (int) $this->getCurrentCompanyId(),
+      (int) $this->input->post('pagina')
+    );
+
+    if ($pagina === NULL) {
+      echo json_encode($this->jsonErro('Escopo inválido.'));
+      return;
+    }
+
+    $pagina['situations'] = $this->invoice_model->situations();
+    $pagina['fatura_aqui'] = ((string) $contrato->billing_source === 'cdwfinance');
+
+    echo json_encode([
+      'success' => TRUE,
+      'return' => TRUE,
+      'message' => '',
+      'data' => $pagina,
+      'errors' => [],
+    ]);
   }
 }

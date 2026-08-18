@@ -169,7 +169,7 @@
                         <div id="resultado_teste_bomcontrole" class="mt-3"></div>
                         <div class="alert alert-info mt-3 mb-0" role="alert">
                             <div class="alert-message">
-                                A chave é gerada no próprio Bom Controle e vale só para esta empresa. Com a integração ativa, os contratos dos clientes desta empresa podem ser vinculados aos contratos do Bom Controle e o extrato financeiro passa a ser consultado por lá.
+                                A chave é gerada no próprio Bom Controle e vale só para esta empresa. Com a integração ativa, os contratos dos clientes desta empresa podem ser vinculados aos contratos do Bom Controle e o Extrato Bom Controle passa a ser consultado por lá.
                                 <a href="https://documenter.getpostman.com/view/1797561/SWT7BKWo?version=latest" target="_blank" rel="noopener">Documentação da API</a>.
                             </div>
                         </div>

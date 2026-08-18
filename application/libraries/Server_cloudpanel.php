@@ -29,6 +29,9 @@ class Server_cloudpanel
     /** Onde o CloudPanel guarda os vhosts de sites suspensos. */
     const NGINX_SUSPENDED_DIR = '/etc/nginx/sites-suspended';
 
+    /** Onde ficam os vhosts dos sites no ar. */
+    const NGINX_ENABLED_DIR = '/etc/nginx/sites-enabled';
+
     /** Piso e teto do timeout da varredura, em segundos. */
     const SCAN_TIMEOUT_MIN = 120;
     const SCAN_TIMEOUT_MAX = 900;
@@ -207,6 +210,231 @@ class Server_cloudpanel
         if (!is_finite($mb) || $mb < 0) return NULL;
 
         return ['user' => $usuario, 'domain' => $dominio, 'mb' => $mb, 'status' => $status];
+    }
+
+    /**
+     * Suspende ou reativa um SITE do CloudPanel.
+     *
+     * Diferente do WHM e do DirectAdmin, aqui não existe conta suspensa: o
+     * painel não tem `clpctl site:suspend`. A suspensão é feita movendo o vhost
+     * entre sites-enabled e sites-suspended e recarregando o nginx — o mesmo
+     * diretório que a varredura já lê para reportar o status. Por isso a
+     * unidade é o DOMÍNIO, e não o usuário do sistema.
+     *
+     * A troca só é efetivada se `nginx -t` aprovar a configuração resultante;
+     * em qualquer falha o vhost volta para o lugar de origem ANTES de o erro
+     * subir — meio caminho aqui derruba todos os sites do servidor, não só o
+     * deste contrato.
+     *
+     * @param  array  $config
+     * @param  string $dominio
+     * @param  bool   $suspender TRUE suspende, FALSE reativa
+     * @return array  success, message, already (TRUE quando já estava no estado pedido)
+     */
+    public function setSuspension($config, $dominio, $suspender)
+    {
+        $alvo = mb_strtolower(trim((string) $dominio));
+
+        // O domínio entra num script de shell: só o que é nome de domínio
+        // passa. A validação é da library (e não só de quem chama) porque é
+        // aqui que o texto vira comando.
+        if ($alvo === '' || !preg_match('/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/', $alvo)) {
+            return ['success' => FALSE, 'message' => 'Domínio inválido para a operação no CloudPanel.', 'already' => FALSE];
+        }
+
+        $acao = $suspender ? 'suspender' : 'reativar';
+        $script = $suspender ? $this->buildSuspenderScript($alvo) : $this->buildReativarScript($alvo);
+
+        $resultado = $this->exec($config, $script, $this->timeout($config));
+        if (empty($resultado['success'])) {
+            return ['success' => FALSE, 'message' => $resultado['message'], 'already' => FALSE];
+        }
+
+        return $this->parseMarcadorSuspensao($resultado['output'], $alvo, $acao);
+    }
+
+    /**
+     * Lê o marcador que o script remoto imprime.
+     *
+     * Os scripts saem sempre com código 0 e comunicam o resultado por um
+     * marcador na saída: assim uma falha de negócio (vhost ausente) não se
+     * mistura com falha de SSH, que o `exec()` já reporta por conta própria.
+     *
+     * @param  string $saida
+     * @param  string $dominio
+     * @param  string $acao
+     * @return array  success, message, already
+     */
+    private function parseMarcadorSuspensao($saida, $dominio, $acao)
+    {
+        $linhas = array_values(array_filter(array_map('trim', explode("\n", (string) $saida)), 'strlen'));
+        $marcador = '';
+        foreach (array_reverse($linhas) as $linha) {
+            if (strpos($linha, '__') === 0) {
+                $marcador = $linha;
+                break;
+            }
+        }
+
+        if ($marcador === '__OK__') {
+            return ['success' => TRUE, 'message' => '', 'already' => FALSE];
+        }
+        if ($marcador === '__JA_APLICADO__') {
+            return ['success' => TRUE, 'message' => 'O site ' . $dominio . ' já estava nesse estado.', 'already' => TRUE];
+        }
+        if ($marcador === '__SEM_VHOST__') {
+            return [
+                'success' => FALSE,
+                'message' => 'vhost de ' . $dominio . ' não encontrado em ' . self::NGINX_ENABLED_DIR . ' nem em ' . self::NGINX_SUSPENDED_DIR . '.',
+                'already' => FALSE,
+            ];
+        }
+        if ($marcador === '__NGINX_INVALIDO__') {
+            return [
+                'success' => FALSE,
+                'message' => 'O nginx recusou a configuração ao ' . $acao . ' ' . $dominio . '. O vhost foi restaurado e nada foi alterado.',
+                'already' => FALSE,
+            ];
+        }
+        if (strpos($marcador, '__ERRO__:') === 0) {
+            $detalhe = trim(substr($marcador, strlen('__ERRO__:')));
+            return [
+                'success' => FALSE,
+                'message' => $detalhe !== '' ? $detalhe : ('Falha ao ' . $acao . ' ' . $dominio . '.'),
+                'already' => FALSE,
+            ];
+        }
+
+        $bruto = trim((string) $saida);
+        return [
+            'success' => FALSE,
+            'message' => 'Resposta inesperada do servidor ao ' . $acao . ' ' . $dominio . ': ' . ($bruto !== '' ? mb_substr($bruto, 0, 200) : '(vazia)'),
+            'already' => FALSE,
+        ];
+    }
+
+    /**
+     * Move o vhost para sites-suspended.
+     *
+     * Quando não há `<dominio>.conf` no sites-enabled, procura o arquivo pelo
+     * `server_name` — no CloudPanel um site com domínio adicional pode estar
+     * num vhost cujo nome de arquivo é o do domínio principal.
+     *
+     * O caminho de origem é guardado num `.origin` ao lado do vhost para a
+     * reativação devolver o arquivo exatamente de onde ele saiu.
+     *
+     * @param  string $dominio já validado por setSuspension()
+     * @return string
+     */
+    private function buildSuspenderScript($dominio)
+    {
+        $dominioRe = str_replace('.', '\\.', $dominio);
+
+        return implode("\n", [
+            'set +e',
+            'DOMINIO="' . $dominio . '"',
+            'DOMINIO_RE="' . $dominioRe . '"',
+            'ENABLED="' . self::NGINX_ENABLED_DIR . '"',
+            'SUSPENSOS="' . self::NGINX_SUSPENDED_DIR . '"',
+            '',
+            'mkdir -p "${SUSPENSOS}" 2>/dev/null',
+            '',
+            'if [ -f "${SUSPENSOS}/${DOMINIO}.conf" ]; then',
+            '  echo "__JA_APLICADO__"',
+            '  exit 0',
+            'fi',
+            '',
+            'SRC="${ENABLED}/${DOMINIO}.conf"',
+            'if [ ! -f "${SRC}" ]; then',
+            '  SRC=$(grep -rlE "^[[:space:]]*server_name[^;]*[[:space:]]${DOMINIO_RE}([[:space:]]|;)" "${ENABLED}" 2>/dev/null | head -1)',
+            'fi',
+            '',
+            'if [ -z "${SRC}" ] || [ ! -f "${SRC}" ]; then',
+            '  echo "__SEM_VHOST__"',
+            '  exit 0',
+            'fi',
+            '',
+            'mv "${SRC}" "${SUSPENSOS}/${DOMINIO}.conf" 2>/dev/null',
+            'if [ ! -f "${SUSPENSOS}/${DOMINIO}.conf" ]; then',
+            '  echo "__ERRO__:nao foi possivel mover o vhost ${SRC}"',
+            '  exit 0',
+            'fi',
+            'printf \'%s\\n\' "${SRC}" > "${SUSPENSOS}/${DOMINIO}.origin"',
+            '',
+            'if ! nginx -t >/dev/null 2>&1; then',
+            '  mv "${SUSPENSOS}/${DOMINIO}.conf" "${SRC}" 2>/dev/null',
+            '  rm -f "${SUSPENSOS}/${DOMINIO}.origin"',
+            '  echo "__NGINX_INVALIDO__"',
+            '  exit 0',
+            'fi',
+            '',
+            'if ! (systemctl reload nginx >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1); then',
+            '  mv "${SUSPENSOS}/${DOMINIO}.conf" "${SRC}" 2>/dev/null',
+            '  rm -f "${SUSPENSOS}/${DOMINIO}.origin"',
+            '  echo "__ERRO__:falha ao recarregar o nginx"',
+            '  exit 0',
+            'fi',
+            '',
+            'echo "__OK__"',
+            'exit 0',
+        ]);
+    }
+
+    /**
+     * Devolve o vhost ao sites-enabled, no caminho registrado no `.origin`
+     * (quando existe e aponta para dentro do próprio sites-enabled).
+     *
+     * @param  string $dominio já validado por setSuspension()
+     * @return string
+     */
+    private function buildReativarScript($dominio)
+    {
+        return implode("\n", [
+            'set +e',
+            'DOMINIO="' . $dominio . '"',
+            'ENABLED="' . self::NGINX_ENABLED_DIR . '"',
+            'SUSPENSOS="' . self::NGINX_SUSPENDED_DIR . '"',
+            'SRC="${SUSPENSOS}/${DOMINIO}.conf"',
+            '',
+            'if [ ! -f "${SRC}" ]; then',
+            '  if [ -f "${ENABLED}/${DOMINIO}.conf" ]; then',
+            '    echo "__JA_APLICADO__"',
+            '  else',
+            '    echo "__SEM_VHOST__"',
+            '  fi',
+            '  exit 0',
+            'fi',
+            '',
+            'DEST="${ENABLED}/${DOMINIO}.conf"',
+            'if [ -f "${SUSPENSOS}/${DOMINIO}.origin" ]; then',
+            '  ORIGEM=$(head -1 "${SUSPENSOS}/${DOMINIO}.origin")',
+            '  case "${ORIGEM}" in',
+            '    "${ENABLED}"/*) DEST="${ORIGEM}" ;;',
+            '  esac',
+            'fi',
+            '',
+            'mv "${SRC}" "${DEST}" 2>/dev/null',
+            'if [ ! -f "${DEST}" ]; then',
+            '  echo "__ERRO__:nao foi possivel restaurar o vhost em ${DEST}"',
+            '  exit 0',
+            'fi',
+            '',
+            'if ! nginx -t >/dev/null 2>&1; then',
+            '  mv "${DEST}" "${SRC}" 2>/dev/null',
+            '  echo "__NGINX_INVALIDO__"',
+            '  exit 0',
+            'fi',
+            '',
+            'rm -f "${SUSPENSOS}/${DOMINIO}.origin"',
+            '',
+            'if ! (systemctl reload nginx >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1); then',
+            '  echo "__ERRO__:falha ao recarregar o nginx"',
+            '  exit 0',
+            'fi',
+            '',
+            'echo "__OK__"',
+            'exit 0',
+        ]);
     }
 
     /**

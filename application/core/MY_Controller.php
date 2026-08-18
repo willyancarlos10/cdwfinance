@@ -153,12 +153,29 @@ class MY_Controller extends CI_Controller
 
             // Contadores da Central de Notificações (sino do topo).
             //
-            // Zerados: os contadores antigos (leads de formulário e currículos
-            // do banco de talentos) saíram junto com os módulos do CMS. Cada
-            // rotina nova do financeiro que precise notificar soma aqui e
-            // acrescenta o próprio item em views/menu.php.
-            $this->data['pending_header'] = 0;
-            $this->data['total_tasks'] = $this->data['pending_header'];
+            // Os contadores antigos (leads de formulário e currículos do banco
+            // de talentos) saíram junto com os módulos do CMS. Hoje o que pende
+            // são as faturas vencidas do tenant — cada rotina nova do financeiro
+            // que precise notificar soma aqui e acrescenta o próprio item em
+            // views/menu.php.
+            $this->load->model('invoice_model');
+            $this->data['pending_header'] = $this->invoice_model->countOverdue($idCompany);
+
+            // Monitoramento: eventos ainda não vistos, sem contar os de domínio
+            // silenciado e sem os informativos (título de home muda sozinho e
+            // encheria o sino todo dia). Query direta com bind, e não pelo
+            // Global_model, para o contador não herdar o filtro da sessão.
+            $eventosMonitor = $this->db->query(
+                'SELECT COUNT(*) AS `total`
+                   FROM `crm_domains_monitor_events` `e`
+                   LEFT JOIN `crm_domains_monitor` `m` ON `m`.`id` = `e`.`id_monitor`
+                  WHERE `e`.`id_company` = ? AND `e`.`acknowledged` = 0
+                    AND `e`.`severity` <> ? AND COALESCE(`m`.`muted`, 0) = 0',
+                [$idCompany, 'info']
+            )->row();
+
+            $this->data['monitor_header'] = empty($eventosMonitor->total) ? 0 : (int) $eventosMonitor->total;
+            $this->data['total_tasks'] = $this->data['pending_header'] + $this->data['monitor_header'];
 
             // Último acesso da empresa selecionada no filtro (exibido de forma discreta na sidebar).
             // Só é consultado/mostrado para a empresa master (id 1).
@@ -311,6 +328,7 @@ class MY_Controller extends CI_Controller
             'crm_user_groups',
             'crm_servers',
             'crm_service_types',
+            'crm_end_reasons',
         ];
 
         $table = $this->input->post('table');

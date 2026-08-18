@@ -19,7 +19,8 @@ $abas = [
   ['id' => 'tab_dominios', 'titulo' => 'Domínios', 'icone' => 'mdi-web', 'texto' => 'Domínios vinculados a este cliente.'],
   ['id' => 'tab_atividades', 'titulo' => 'Atividades', 'icone' => 'mdi-history', 'texto' => 'Histórico de interações e tarefas.'],
   ['id' => 'tab_orcamentos', 'titulo' => 'Orçamentos', 'icone' => 'mdi-file-percent-outline', 'texto' => 'Orçamentos enviados para este cliente.'],
-  ['id' => 'tab_extrato', 'titulo' => 'Extrato financeiro', 'icone' => 'mdi-cash-multiple', 'texto' => 'Faturas, boletos e movimentações.'],
+  ['id' => 'tab_extrato', 'titulo' => 'Extrato Bom Controle', 'icone' => 'mdi-cash-multiple', 'texto' => 'Faturas, boletos e movimentações do ERP.'],
+  ['id' => 'tab_faturas', 'titulo' => 'Faturas', 'icone' => 'mdi-receipt-text-outline', 'texto' => 'Faturas geradas pelo CDW Finance.'],
 ];
 $badgeContratoStatus = ['vigente' => 'bg-success', 'suspenso' => 'bg-warning', 'encerrado' => 'bg-secondary'];
 // Rótulo por mapa: o ternário antigo (`=== 'vigente' ? 'Vigente' : 'Suspenso'`)
@@ -216,6 +217,16 @@ $gb = function ($valor) {
                     </div>
                   <?php } ?>
                 </div>
+              <?php } elseif ($aba['id'] === 'tab_faturas') { ?>
+                <div class="row align-items-center mb-2">
+                  <div class="col">
+                    <span class="text-muted">Faturas geradas pelo CDW Finance em todos os contratos deste cliente.</span>
+                  </div>
+                  <div class="col-auto text-end">
+                    <button type="button" class="btn btn-sm btn-outline-primary" id="btn_atualizar_faturas_cliente"><i class="mdi mdi-refresh"></i> ATUALIZAR</button>
+                  </div>
+                </div>
+                <div id="faturas_cliente_conteudo"></div>
               <?php } else { ?>
                 <div class="text-center text-muted py-5">
                   <i class="mdi <?php echo $aba['icone']; ?> fs-1 d-block mb-2"></i>
@@ -262,7 +273,7 @@ $gb = function ($valor) {
             <?php foreach ($contracts as $ct) { ?>
               <tr>
                 <td align="center">
-                  <a class="btn btn-sm btn-outline-primary" href="<?php echo base_url('contratos/info?id=' . (int) $ct->id); ?>" title="Abrir contrato"><i class="fa fa-eye"></i></a>
+                  <a class="btn btn-sm btn-outline-primary" href="<?php echo base_url('contratos/info?id=' . (int) $ct->id); ?>" title="Abrir contrato"><i class="fa fa-eye"></i> CONTRATO</a>
                 </td>
                 <td>
                   <a href="<?php echo base_url('contratos/info?id=' . (int) $ct->id); ?>"><strong>#<?php echo (int) $ct->id; ?></strong></a><br />
@@ -476,9 +487,9 @@ $gb = function ($valor) {
           <div class="row">
             <div class="col-12 col-md-6">
               <div class="form-group mb-3">
-                <label class="form-label">* Data de criação</label>
+                <label class="form-label">* Data</label>
                 <input type="text" class="form-control" name="contract[created]" data-mask="00/00/0000" placeholder="dd/mm/aaaa" value="<?php echo date('d/m/Y'); ?>">
-                <small class="text-muted">Retroaja ao lançar um contrato antigo: é a data que o dashboard usa como entrada.</small>
+                <!-- <small class="text-muted">Retroaja ao lançar um contrato antigo: é a data que o dashboard usa como entrada.</small> -->
               </div>
             </div>
             <div class="col-12 col-md-6">
@@ -500,6 +511,12 @@ $gb = function ($valor) {
             </div>
             <div class="col-12 col-md-6">
               <div class="form-group mb-3">
+                <label class="form-label">Espaço contratado (Gb)</label>
+                <input type="number" min="0" step="0.01" class="form-control" name="contract[space_gb]" value="" placeholder="0">
+              </div>
+            </div>
+            <div class="col-12">
+              <div class="form-group mb-3">
                 <label class="form-label">* Tipos de serviços <small class="text-muted">(marque um ou mais)</small></label>
                 <?php if (!empty($service_types)) { ?>
                   <div class="border rounded p-2" style="max-height: 180px; overflow-y: auto;">
@@ -515,12 +532,7 @@ $gb = function ($valor) {
                 <?php } ?>
               </div>
             </div>
-            <div class="col-12 col-md-6">
-              <div class="form-group mb-3">
-                <label class="form-label">Espaço contratado (Gb)</label>
-                <input type="number" min="0" step="0.01" class="form-control" name="contract[space_gb]" value="" placeholder="0">
-              </div>
-            </div>
+            
             <div class="col-12">
               <div class="form-group mb-3">
                 <label class="form-label">Observações</label>
@@ -838,7 +850,7 @@ $gb = function ($valor) {
     });
 
     // ------------------------------------------------------------------
-    // Aba Extrato financeiro (Bom Controle) — agregado dos contratos
+    // Aba Extrato Bom Controle — agregado dos contratos
     // vinculados; o vínculo em si é feito na tela de cada contrato.
     // ------------------------------------------------------------------
     var bcAtivo = <?php echo !empty($bomcontrole_ativo) ? 'true' : 'false'; ?>;
@@ -900,7 +912,7 @@ $gb = function ($valor) {
         $saida.html('<div class="text-center text-muted py-5">' +
           '<i class="mdi mdi-cash-multiple fs-1 d-block mb-2"></i>' +
           '<h5 class="mb-1">Nenhum contrato vinculado ao Bom Controle</h5>' +
-          '<p class="mb-0">O vínculo é feito na aba Extrato financeiro de cada contrato.</p></div>');
+          '<p class="mb-0">O vínculo é feito na aba Extrato Bom Controle de cada contrato.</p></div>');
         return;
       }
 
@@ -977,6 +989,164 @@ $gb = function ($valor) {
 
     $('#btn_atualizar_extrato_cliente').on('click', function() {
       carregarExtratoCliente(true);
+    });
+
+    // ------------------------------------------------------------------
+    // Aba Faturas — as do CDW Finance, de todos os contratos do cliente
+    // ------------------------------------------------------------------
+    // Mesma paginação da aba do contrato; a diferença é a coluna Contrato,
+    // que aqui é necessária (a lista mistura contratos) e lá seria uma coluna
+    // com o mesmo valor em todas as linhas.
+    var faturasClientePagina = 1;
+    var faturasClienteCarregado = false;
+    var faturasClienteCarregando = false;
+
+    var badgeSituacao = {
+      paga: 'bg-success',
+      vencida: 'bg-danger',
+      a_vencer: 'bg-primary',
+      cancelada: 'bg-secondary'
+    };
+
+    function linhaFaturaCliente(item, rotulos) {
+      var sit = String(item.situation || '');
+      var badge = badgeSituacao[sit] || 'bg-secondary';
+      var rotulo = rotulos[sit] || sit;
+      var competencia = String(item.competence || '').split('-');
+      competencia = competencia.length === 3 ? competencia[1] + '/' + competencia[0] : '—';
+
+      var contrato = '<a href="<?php echo base_url('contratos/info?id='); ?>' + encodeURIComponent(item.id_contract) + '">#' + esc(item.id_contract) + '</a>';
+
+      return '<tr>' +
+        '<td class="text-center">' + contrato + '</td>' +
+        '<td class="text-center">' + competencia + '</td>' +
+        '<td class="text-center">' + parcelaRotulo(item) + '</td>' +
+        '<td class="text-center">' + dataBr(item.due_date) + '</td>' +
+        '<td class="text-end">' + moedaBr(item.value) + '</td>' +
+        '<td class="text-center"><span class="badge ' + badge + '">' + esc(rotulo) + '</span></td>' +
+        '<td><small>' + esc(item.description) + origemRotulo(item) + '</small></td>' +
+        '</tr>';
+    }
+
+    // Mesma regra da aba do contrato: "1/1" vira travessão, e a avulsa ganha
+    // marcador porque cai no mesmo mês da recorrência.
+    function parcelaRotulo(item) {
+      var total = parseInt(item.installments_total, 10) || 1;
+      if (total <= 1) return '<span class="text-muted">—</span>';
+      return esc(item.installment_number) + '/' + esc(total);
+    }
+
+    function origemRotulo(item) {
+      if (!item.id_charge || parseInt(item.id_charge, 10) === 0) return '';
+      return ' <span class="badge bg-light text-dark border">avulsa</span>';
+    }
+
+    function renderFaturasCliente(data) {
+      var $saida = $('#faturas_cliente_conteudo');
+      var rotulos = data.situations || {};
+
+      if (!data.total) {
+        $saida.html('<div class="text-center text-muted py-5">' +
+          '<i class="mdi mdi-receipt-text-outline fs-1 d-block mb-2"></i>' +
+          '<h5 class="mb-1">Nenhuma fatura</h5>' +
+          '<p class="mb-0">Nenhum contrato deste cliente é faturado pelo CDW Finance ainda. A configuração fica no bloco Faturamento de cada contrato.</p></div>');
+        return;
+      }
+
+      var html = '<div class="table-responsive"><table class="table table-sm table-striped table-bordered table-hover mb-2">' +
+        '<thead><tr>' +
+        '<th class="text-center">Contrato</th>' +
+        '<th class="text-center">Competência</th>' +
+        '<th class="text-center">Parcela</th>' +
+        '<th class="text-center">Vencimento</th>' +
+        '<th class="text-end">Valor</th>' +
+        '<th class="text-center">Situação</th>' +
+        '<th>Descrição</th>' +
+        '</tr></thead><tbody>';
+
+      $.each(data.itens || [], function(i, item) {
+        html += linhaFaturaCliente(item, rotulos);
+      });
+
+      html += '</tbody></table></div>';
+      html += rodapeFaturasCliente(data);
+
+      $saida.html(html);
+    }
+
+    function rodapeFaturasCliente(data) {
+      var resumo = '<span class="text-muted">' + data.total + ' fatura(s) · ' +
+        moedaBr(data.valor_total) + ' no total';
+
+      if (data.valor_aberto > 0) {
+        resumo += ' · <strong>' + moedaBr(data.valor_aberto) + ' em aberto</strong>';
+      }
+      if (data.valor_vencido > 0) {
+        resumo += ' · <span class="text-danger">' + moedaBr(data.valor_vencido) + ' vencido</span>';
+      }
+      resumo += '</span>';
+
+      var nav = '';
+      if (data.paginas > 1) {
+        nav = '<div class="btn-group btn-group-sm" role="group">' +
+          '<button type="button" class="btn btn-outline-secondary btn-faturas-cliente-pag" data-pagina="' + (data.pagina - 1) + '"' +
+          (data.pagina <= 1 ? ' disabled' : '') + '><i class="mdi mdi-chevron-left"></i> ANTERIOR</button>' +
+          '<button type="button" class="btn btn-outline-secondary" disabled>' + data.pagina + ' / ' + data.paginas + '</button>' +
+          '<button type="button" class="btn btn-outline-secondary btn-faturas-cliente-pag" data-pagina="' + (data.pagina + 1) + '"' +
+          (data.pagina >= data.paginas ? ' disabled' : '') + '>PRÓXIMA <i class="mdi mdi-chevron-right"></i></button>' +
+          '</div>';
+      }
+
+      return '<div class="row align-items-center"><div class="col"><small>' + resumo + '</small></div>' +
+        '<div class="col-auto">' + nav + '</div></div>';
+    }
+
+    function carregarFaturasCliente(pagina) {
+      if (faturasClienteCarregando) return;
+      faturasClienteCarregando = true;
+
+      var $saida = $('#faturas_cliente_conteudo');
+      $saida.html('<div class="text-center py-4"><div class="spinner-border text-primary" role="status"></div></div>');
+
+      $.ajax({
+        url: '<?php echo base_url('clientes/json_postfaturas'); ?>',
+        type: 'POST',
+        dataType: 'json',
+        data: {
+          id: <?php echo (int) $result->id; ?>,
+          pagina: pagina
+        },
+        success: function(data) {
+          if (!data || !data.success) {
+            $saida.html($('<div class="alert alert-danger mb-0"><div class="alert-message"></div></div>')
+              .find('.alert-message').text((data && data.message) ? data.message : 'Erro ao consultar as faturas.').end());
+            faturasClienteCarregado = false;
+            return;
+          }
+          faturasClientePagina = data.data.pagina;
+          faturasClienteCarregado = true;
+          renderFaturasCliente(data.data);
+        },
+        error: function() {
+          $saida.html('<div class="alert alert-danger mb-0"><div class="alert-message">Erro de comunicação ao consultar as faturas.</div></div>');
+          faturasClienteCarregado = false;
+        },
+        complete: function() {
+          faturasClienteCarregando = false;
+        }
+      });
+    }
+
+    $('a[href="#tab_faturas"]').on('shown.bs.tab', function() {
+      if (!faturasClienteCarregado) carregarFaturasCliente(faturasClientePagina);
+    });
+
+    $('#btn_atualizar_faturas_cliente').on('click', function() {
+      carregarFaturasCliente(faturasClientePagina);
+    });
+
+    $('#faturas_cliente_conteudo').on('click', '.btn-faturas-cliente-pag', function() {
+      carregarFaturasCliente(parseInt($(this).data('pagina'), 10) || 1);
     });
 
     // Sincronização do cadastro com o Bom Controle, sob demanda.

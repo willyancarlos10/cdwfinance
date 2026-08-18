@@ -5,7 +5,7 @@ defined('BASEPATH') or exit('No direct script access allowed');
 class Parametros_gerais extends MY_Controller
 {
   /** Abas aceitas em ?tab= — valor fora daqui deixaria a tela sem aba ativa. */
-  const TABS = ['tab_email', 'tab_ninjas', 'tab_rdap'];
+  const TABS = ['tab_email', 'tab_ninjas', 'tab_rdap', 'tab_faturamento', 'tab_monitoramento'];
 
   public function __construct()
   {
@@ -287,6 +287,114 @@ class Parametros_gerais extends MY_Controller
     ];
   }
 
+  /**
+   * Parâmetros do faturamento próprio: antecedência da geração, dia de
+   * vencimento sugerido e o texto do aviso de reajuste.
+   *
+   * O corpo do e-mail é texto livre com marcadores (`{cliente}`,
+   * `{percentual}`...) — a substituição acontece no Adjustment_model, e
+   * marcador desconhecido permanece literal, para que um erro de digitação
+   * apareça no e-mail em vez de sumir em silêncio.
+   */
+  public function post_faturamento()
+  {
+    $input = $this->input->post('faturamento');
+    if (!is_array($input)) {
+      $input = [];
+    }
+
+    $antecedencia = isset($input['faturamento_dias_antecedencia']) ? (int) $input['faturamento_dias_antecedencia'] : 0;
+    if ($antecedencia < 1 || $antecedencia > 90) {
+      $this->session->set_flashdata('warning', 'A antecedência da geração deve estar entre 1 e 90 dias.');
+      redirect(base_url('parametros_gerais?tab=tab_faturamento'));
+    }
+
+    $diaPadrao = isset($input['faturamento_dia_padrao']) ? (int) $input['faturamento_dia_padrao'] : 0;
+    if ($diaPadrao < 1 || $diaPadrao > 31) {
+      $this->session->set_flashdata('warning', 'O dia de vencimento padrão deve estar entre 1 e 31.');
+      redirect(base_url('parametros_gerais?tab=tab_faturamento'));
+    }
+
+    $diasAviso = isset($input['reajuste_dias_aviso']) ? (int) $input['reajuste_dias_aviso'] : 0;
+    if ($diasAviso < 1 || $diasAviso > 180) {
+      $this->session->set_flashdata('warning', 'A antecedência do aviso de reajuste deve estar entre 1 e 180 dias.');
+      redirect(base_url('parametros_gerais?tab=tab_faturamento'));
+    }
+
+    $assunto = trim((string) ($input['reajuste_email_assunto'] ?? ''));
+    $corpo = trim((string) ($input['reajuste_email_corpo'] ?? ''));
+
+    if ($assunto === '' || $corpo === '') {
+      $this->session->set_flashdata('warning', 'Informe o assunto e o corpo do e-mail de reajuste.');
+      redirect(base_url('parametros_gerais?tab=tab_faturamento'));
+    }
+
+    $this->general_settings_model->saveGroup('faturamento', [
+      'faturamento_dias_antecedencia' => (string) $antecedencia,
+      'faturamento_dia_padrao' => (string) $diaPadrao,
+      'reajuste_dias_aviso' => (string) $diasAviso,
+      'reajuste_email_assunto' => mb_substr($assunto, 0, 200),
+      'reajuste_email_corpo' => $corpo,
+    ], (int) $this->session->userdata('user')->id);
+
+    $this->session->set_flashdata('success', 'Parâmetros de faturamento salvos.');
+    redirect(base_url('parametros_gerais?tab=tab_faturamento'));
+  }
+
+  public function post_monitoramento()
+  {
+    $input = $this->input->post('monitoramento');
+    if (!is_array($input)) {
+      $input = [];
+    }
+
+    $intervalo = isset($input['monitoramento_intervalo_horas']) ? (int) $input['monitoramento_intervalo_horas'] : 0;
+    if ($intervalo < 1 || $intervalo > 168) {
+      $this->session->set_flashdata('warning', 'O intervalo entre checagens deve estar entre 1 e 168 horas.');
+      redirect(base_url('parametros_gerais?tab=tab_monitoramento'));
+    }
+
+    $timeout = isset($input['monitoramento_timeout']) ? (int) $input['monitoramento_timeout'] : 0;
+    if ($timeout < 3 || $timeout > 60) {
+      $this->session->set_flashdata('warning', 'O tempo limite deve estar entre 3 e 60 segundos.');
+      redirect(base_url('parametros_gerais?tab=tab_monitoramento'));
+    }
+
+    $diasSsl = isset($input['monitoramento_ssl_dias_aviso']) ? (int) $input['monitoramento_ssl_dias_aviso'] : 0;
+    if ($diasSsl < 1 || $diasSsl > 90) {
+      $this->session->set_flashdata('warning', 'A antecedência do aviso de SSL deve estar entre 1 e 90 dias.');
+      redirect(base_url('parametros_gerais?tab=tab_monitoramento'));
+    }
+
+    // Allowlist de e-mails: o campo aceita lista separada por vírgula, e endereço
+    // inválido é DESCARTADO com aviso em vez de ir para a fila — um destinatário
+    // quebrado faria todo resumo falhar no cron_enviar_email.
+    $bruto = (string) ($input['monitoramento_email_destinatarios'] ?? '');
+    $validos = [];
+    $invalidos = [];
+    foreach (preg_split('/[;,\s]+/', $bruto) as $email) {
+      $email = trim($email);
+      if ($email === '') continue;
+      if (filter_var($email, FILTER_VALIDATE_EMAIL)) $validos[] = $email; else $invalidos[] = $email;
+    }
+
+    $this->general_settings_model->saveGroup('monitoramento', [
+      'monitoramento_intervalo_horas' => (string) $intervalo,
+      'monitoramento_timeout' => (string) $timeout,
+      'monitoramento_ssl_dias_aviso' => (string) $diasSsl,
+      'monitoramento_email_destinatarios' => mb_substr(implode(', ', array_unique($validos)), 0, 500),
+    ], (int) $this->session->userdata('user')->id);
+
+    if (!empty($invalidos)) {
+      $this->session->set_flashdata('warning', 'Parâmetros salvos, mas estes endereços foram descartados por não serem válidos: '
+        . implode(', ', $invalidos) . '.');
+    } else {
+      $this->session->set_flashdata('success', 'Parâmetros de monitoramento salvos.');
+    }
+
+    redirect(base_url('parametros_gerais?tab=tab_monitoramento'));
+  }
+
   private function resolveTabDefault()
   {
     $tab = (string) $this->input->get('tab');
@@ -314,6 +422,31 @@ class Parametros_gerais extends MY_Controller
     unset($ninjas['ninjas_api_key']);
     $this->data['ninjas_settings'] = $ninjas;
     $this->data['rdap_settings'] = $this->general_settings_model->getGroup('rdap');
+
+    // Faturamento: os models carregam os defaults, para a tela nunca abrir com
+    // campo vazio antes do primeiro salvamento (o grupo só nasce no saveGroup).
+    $this->load->model('invoice_model');
+    $this->load->model('adjustment_model');
+
+    $this->data['faturamento_settings'] = $this->general_settings_model->getGroup('faturamento');
+    $this->data['faturamento_defaults'] = [
+      'faturamento_dias_antecedencia' => $this->invoice_model->diasAntecedencia(),
+      'faturamento_dia_padrao' => $this->invoice_model->diaPadrao(),
+      'reajuste_dias_aviso' => $this->adjustment_model->diasAviso(),
+      'reajuste_email_assunto' => $this->adjustment_model->assuntoConfigurado(),
+      'reajuste_email_corpo' => $this->adjustment_model->corpoConfigurado(),
+    ];
+    $this->data['reajuste_marcadores'] = $this->adjustment_model->marcadoresDisponiveis();
+
+    // Monitoramento: mesmo padrão — os defaults vêm do model.
+    $this->load->model('site_monitor_model');
+    $this->data['monitoramento_settings'] = $this->general_settings_model->getGroup('monitoramento');
+    $this->data['monitoramento_defaults'] = [
+      'monitoramento_intervalo_horas' => $this->site_monitor_model->intervaloHoras(),
+      'monitoramento_timeout' => $this->site_monitor_model->timeoutChecagem(),
+      'monitoramento_ssl_dias_aviso' => $this->site_monitor_model->diasAvisoSsl(),
+      'monitoramento_email_destinatarios' => '',
+    ];
 
     $this->load->library('secret_crypto');
     $this->data['crypto_ready'] = $this->secret_crypto->isReady();

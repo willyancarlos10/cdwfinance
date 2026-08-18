@@ -180,6 +180,65 @@ class Bom_controle
     }
 
     // ------------------------------------------------------------------
+    // Catálogo de serviços
+    //
+    // É de onde sai o `Servicos[].IdServico` que a emissão da venda exige.
+    //
+    // Usa o `Servico/Pesquisar`, e NÃO o `ProdutoServico/Pesquisar` que a doc
+    // sugere para listar sem filtro: aquele devolve lista vazia com
+    // `produto=false&servico=true` e HTTP 500 com os dois `true` (verificado
+    // contra a conta real). Aqui o `nome` é documentado como obrigatório mas
+    // aceita vazio, e é assim que se lista o catálogo inteiro.
+    // ------------------------------------------------------------------
+
+    /**
+     * GET /integracao/Servico/Pesquisar
+     *
+     * A resposta vem em envelope {Itens, TotalItens} — mesma divergência do
+     * VendaContrato/Pesquisar, e o normalizarLista() já cobre as duas formas.
+     * A paginação funciona, embora a doc não a cite neste endpoint.
+     *
+     * @param  array  $config
+     * @param  string $nome vazio = catálogo inteiro
+     * @param  int    $itensPorPagina
+     * @param  int    $pagina 1-based
+     * @return array data = ['Itens' => [...], 'TotalItens' => int]
+     */
+    public function pesquisarServicos(array $config, $nome = '', $itensPorPagina = 100, $pagina = 1)
+    {
+        $resultado = $this->requisitar($config, '/integracao/Servico/Pesquisar', [
+            'nome' => (string) $nome,
+            'paginacao.itensPorPagina' => $this->limitarItensPorPagina($itensPorPagina),
+            'paginacao.numeroDaPagina' => max(1, (int) $pagina),
+        ]);
+
+        if (!$resultado['success']) {
+            return $resultado;
+        }
+
+        $resultado['data'] = $this->normalizarLista($resultado['data']);
+        return $resultado;
+    }
+
+    /**
+     * GET /integracao/Servico/Obter/{id}
+     *
+     * Id inexistente responde HTTP 400 com a mensagem do ERP — é o que permite
+     * revalidar no servidor o id que veio da tela.
+     *
+     * @param  array $config
+     * @param  int   $idServicoBc
+     * @return array data = ['Id', 'Nome', 'Observacao', 'Valor', 'IdTipoServico', 'NomeTipoServico']
+     */
+    public function obterServico(array $config, $idServicoBc)
+    {
+        return $this->requisitar(
+            $config,
+            '/integracao/Servico/Obter/' . (int) $idServicoBc
+        );
+    }
+
+    // ------------------------------------------------------------------
     // Cadastro de cliente
     //
     // A API separa em três endpoints o que aqui é um formulário só:

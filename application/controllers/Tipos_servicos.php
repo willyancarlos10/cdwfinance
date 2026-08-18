@@ -47,6 +47,10 @@ class Tipos_servicos extends MY_Controller
       $array = [
         'name' => $name,
         'id_status' => 1,
+        // Recorte do monitoramento de sites: só o domínio de contrato cujo tipo
+        // tem site é checado. O checkbox desmarcado não é enviado pelo
+        // navegador, daí o empty() em vez de ler o valor.
+        'monitor_site' => empty($this->input->post('monitor_site')) ? 0 : 1,
         'created' => date("Y-m-d H:i:s"),
         'created_by' => $this->session->userdata('user')->id,
         'modified' => date("Y-m-d H:i:s"),
@@ -86,6 +90,7 @@ class Tipos_servicos extends MY_Controller
 
       $array = [
         'name' => $name,
+        'monitor_site' => empty($this->input->post('monitor_site')) ? 0 : 1,
         'modified' => date("Y-m-d H:i:s"),
         'modified_by' => $this->session->userdata('user')->id,
       ];

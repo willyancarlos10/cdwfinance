@@ -229,6 +229,69 @@ class Server_directadmin
     }
 
     /**
+     * Suspende ou reativa um USUÁRIO do DirectAdmin.
+     *
+     * Como no WHM, a unidade é a conta inteira (todos os domínios do usuário
+     * caem juntos) — quem pondera isso é o Server_model.
+     *
+     * O endpoint é o mesmo da tela de listagem do painel
+     * (CMD_SELECT_USERS): `select0` é o usuário e `suspend` diz a direção. Vai
+     * por POST porque é ação, não consulta.
+     *
+     * @param  array  $config
+     * @param  string $usuario
+     * @param  bool   $suspender TRUE suspende, FALSE reativa
+     * @return array  success, message
+     */
+    public function setSuspension($config, $usuario, $suspender)
+    {
+        $conta = trim((string) $usuario);
+        if ($conta === '') {
+            return ['success' => FALSE, 'message' => 'Usuário do DirectAdmin não informado.'];
+        }
+
+        $resposta = $this->request($config, '/CMD_API_SELECT_USERS', [
+            'location' => 'CMD_SELECT_USERS',
+            'suspend' => $suspender ? 'Suspend' : 'Unsuspend',
+            'select0' => $conta,
+        ]);
+
+        if (empty($resposta['success'])) {
+            return ['success' => FALSE, 'message' => $resposta['message']];
+        }
+
+        $falha = $suspender ? 'Falha ao suspender o usuário no DirectAdmin' : 'Falha ao reativar o usuário no DirectAdmin';
+
+        if (stripos($resposta['raw'], '<html') !== FALSE) {
+            return ['success' => FALSE, 'message' => $falha . ': a conta informada não tem permissão de API.'];
+        }
+
+        $dados = $this->parse($resposta['raw']);
+
+        // Só `error=0` é sucesso. O DirectAdmin responde HTTP 200 para erro de
+        // negócio (usuário inexistente, sem permissão), então tratar formato
+        // não reconhecido como sucesso deixaria a conta no ar sem ninguém
+        // saber.
+        if (is_array($dados) && isset($dados['error'])) {
+            if ((string) $dados['error'] === '0') {
+                return ['success' => TRUE, 'message' => isset($dados['text']) ? trim((string) $dados['text']) : ''];
+            }
+
+            $texto = isset($dados['text']) ? trim(strip_tags((string) $dados['text'])) : '';
+            $detalhe = isset($dados['details']) ? trim(strip_tags((string) $dados['details'])) : '';
+            $mensagem = trim($texto . ($detalhe !== '' ? ' — ' . $detalhe : ''));
+
+            return ['success' => FALSE, 'message' => $falha . ($mensagem !== '' ? ': ' . $mensagem : '.')];
+        }
+
+        $bruto = trim((string) $resposta['raw']);
+        return [
+            'success' => FALSE,
+            'message' => $falha . ': resposta em formato não reconhecido' . ($bruto !== '' ? ' (' . mb_substr($bruto, 0, 120) . ')' : '') . '.',
+        ];
+    }
+
+    /**
      * Interpreta a resposta em qualquer um dos três formatos que o DirectAdmin
      * usa: JSON, querystring ou linhas soltas.
      *
@@ -338,14 +401,15 @@ class Server_directadmin
     }
 
     /**
-     * GET autenticado. Devolve o corpo cru — o parsing é do chamador, porque o
-     * formato varia por endpoint.
+     * GET (ou POST, quando `$post` vem preenchido) autenticado. Devolve o corpo
+     * cru — o parsing é do chamador, porque o formato varia por endpoint.
      *
-     * @param  array  $config
-     * @param  string $endpoint
-     * @return array  success, raw, message
+     * @param  array      $config
+     * @param  string     $endpoint
+     * @param  array|null $post corpo do POST; NULL = GET
+     * @return array      success, raw, message
      */
-    private function request($config, $endpoint)
+    private function request($config, $endpoint, $post = NULL)
     {
         $base = $this->baseUrl(isset($config['host']) ? $config['host'] : '');
         if ($base === FALSE) {
@@ -370,6 +434,11 @@ class Server_directadmin
             CURLOPT_TIMEOUT => $timeout,
             CURLOPT_FOLLOWLOCATION => FALSE,
         ]);
+
+        if (is_array($post)) {
+            curl_setopt($ch, CURLOPT_POST, TRUE);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($post));
+        }
 
         $corpo = curl_exec($ch);
         $erroNumero = curl_errno($ch);

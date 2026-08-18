@@ -38,6 +38,15 @@
             <i class="mdi mdi-account-tie"></i> <span class="align-middle">Clientes</span>
           </a>
         </li>
+        <?php $menu_reference = array('faturas'); ?>
+        <li class="sidebar-item <?php if (in_array($menu, $menu_reference)) echo 'active'; ?>">
+          <a class="sidebar-link" href="<?php echo base_url('faturas'); ?>">
+            <i class="mdi mdi-file-document-alert-outline"></i> <span class="align-middle">Faturas</span>
+            <?php if (!empty($pending_header)) { ?>
+              <span class="badge bg-danger ms-1"><?php echo (int) $pending_header; ?></span>
+            <?php } ?>
+          </a>
+        </li>
         <?php $menu_reference = array('servidores'); ?>
         <li class="sidebar-item <?php if (in_array($menu, $menu_reference)) echo 'active'; ?>">
           <a class="sidebar-link" href="<?php echo base_url('servidores'); ?>">
@@ -48,6 +57,15 @@
         <li class="sidebar-item <?php if (in_array($menu, $menu_reference)) echo 'active'; ?>">
           <a class="sidebar-link" href="<?php echo base_url('servidores/dominios'); ?>">
             <i class="mdi mdi-domain"></i> <span class="align-middle">Domínios</span>
+          </a>
+        </li>
+        <?php $menu_reference = array('monitoramento'); ?>
+        <li class="sidebar-item <?php if (in_array($menu, $menu_reference)) echo 'active'; ?>">
+          <a class="sidebar-link" href="<?php echo base_url('monitoramento'); ?>">
+            <i class="mdi mdi-radar"></i> <span class="align-middle">Monitoramento</span>
+            <?php if (!empty($monitor_header)) { ?>
+              <span class="badge bg-danger ms-1"><?php echo (int) $monitor_header; ?></span>
+            <?php } ?>
           </a>
         </li>
         <li class="sidebar-header pt-1 pb-1">CONFIGURAÇÕES</li>
@@ -83,6 +101,18 @@
           <li class="sidebar-item <?php if (in_array($menu, $menu_reference)) echo 'active'; ?>">
             <a class="sidebar-link destaque_pedidos" href="<?php echo base_url('tipos-servicos'); ?>">
               <i class="mdi mdi-tag-multiple"></i> <span class="align-middle">Tipos de serviços</span>
+            </a>
+          </li>
+          <?php $menu_reference = array('motivos-cancelamento'); ?>
+          <li class="sidebar-item <?php if (in_array($menu, $menu_reference)) echo 'active'; ?>">
+            <a class="sidebar-link destaque_pedidos" href="<?php echo base_url('motivos-cancelamento'); ?>">
+              <i class="mdi mdi-close-circle-outline"></i> <span class="align-middle">Motivos cancelamento</span>
+            </a>
+          </li>
+          <?php $menu_reference = array('indices'); ?>
+          <li class="sidebar-item <?php if (in_array($menu, $menu_reference)) echo 'active'; ?>">
+            <a class="sidebar-link destaque_pedidos" href="<?php echo base_url('indices'); ?>">
+              <i class="mdi mdi-chart-line"></i> <span class="align-middle">Índices de reajuste</span>
             </a>
           </li>
           <?php $menu_reference = array('parametros_gerais'); ?>
@@ -156,6 +186,21 @@
                 // próprio <a class="list-group-item"> aqui e soma o contador em
                 // $this->data['total_tasks'] (application/core/MY_Controller.php).
                 ?>
+                <?php if (!empty($monitor_header)) { ?>
+                  <a href="<?php echo base_url('monitoramento'); ?>" class="list-group-item">
+                    <div class="row g-0 align-items-center">
+                      <div class="col-2">
+                        <i class="text-danger mdi mdi-radar fs-3"></i>
+                      </div>
+                      <div class="col-10">
+                        <div class="text-dark">Monitoramento de sites</div>
+                        <div class="text-muted small mt-1">
+                          <?php echo (int) $monitor_header; ?> alteração(ões) sem revisão nos sites dos clientes.
+                        </div>
+                      </div>
+                    </div>
+                  </a>
+                <?php } ?>
                 <?php if ($pending_header > 0) { ?>
                   <a href="<?php echo base_url('painel/minha_conta#tabs3'); ?>" class="list-group-item">
                     <div class="row g-0 align-items-center">

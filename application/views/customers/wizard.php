@@ -562,7 +562,20 @@
         return validarPasso(currentStepIdx);
       });
 
-      $('#wizard_cliente').on('showStep', function(e, anchorObject, stepIndex) {
+      // O número que o SmartWizard passa no showStep é o current_index, e ele
+      // só é atualizado DEPOIS do callback da animação — com transition
+      // 'none' esse callback é síncrono, então o que chega aqui é o índice do
+      // passo ANTERIOR (entrar na revisão chegava como 3, e a revisão nunca
+      // era preenchida). Quem diz qual passo está sendo mostrado é o anchor
+      // do próprio evento.
+      function indicePassoMostrado(anchorObject) {
+        var href = $(anchorObject).attr('href') || '';
+        return parseInt(href.replace('#passo-', ''), 10) - 1;
+      }
+
+      $('#wizard_cliente').on('showStep', function(e, anchorObject) {
+        var stepIndex = indicePassoMostrado(anchorObject);
+
         if (stepIndex === 4) {
           preencherRevisao();
           $('#wizard_cliente .sw-btn-next').hide();

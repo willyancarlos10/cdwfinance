@@ -394,6 +394,145 @@ foreach ($blocos_espaco as $chave => $bloco) {
         </div>
     </div>
 </div>
+<?php
+// Card de cancelamentos. Fica logo abaixo do movimento porque explica a barra
+// laranja dele: lá aparece QUANTO saiu por mês, aqui POR QUÊ e a que custo.
+//
+// A régua das barras de valor é o MAIOR motivo, e não o total — como no gráfico
+// de tipos de serviço, o que interessa é comparar os motivos entre si.
+$canc_maior_valor = 0.0;
+foreach ($ind_cancelamentos['motivos'] as $m) {
+    if ($m['valor'] > $canc_maior_valor) $canc_maior_valor = $m['valor'];
+}
+
+// O que vai para o ApexCharts são as QUANTIDADES CRUAS: ele calcula a fatia e o
+// percentual. Montar a pizza a partir do percentual já arredondado deixaria
+// fresta (três motivos iguais dão 33,3% x 3 = 99,9%).
+$canc_js = [
+    'rotulos' => [],
+    'valores' => [],
+    'cores' => [],
+];
+foreach ($ind_cancelamentos['motivos'] as $m) {
+    $canc_js['rotulos'][] = $m['nome'];
+    $canc_js['valores'][] = $m['quantidade'];
+    $canc_js['cores'][] = $m['cor'];
+}
+?>
+<div class="row">
+    <div class="col-12 d-flex">
+        <div class="card flex-fill">
+            <div class="card-body py-3">
+                <div class="row align-items-start mb-2">
+                    <div class="col">
+                        <h5 class="card-title mb-1">Cancelamentos</h5>
+                        <p class="text-muted mb-0"><small>Contratos encerrados nos últimos <?php echo count($ind_movimento_meses); ?> meses, por motivo do encerramento.</small></p>
+                    </div>
+                </div>
+
+                <?php if (!empty($ind_cancelamentos['motivos'])) { ?>
+                    <div class="row g-3 mb-3">
+                        <div class="col-12 col-sm-4">
+                            <span class="text-muted"><small>Contratos encerrados</small></span>
+                            <h3 class="mb-0"><?php echo numero($ind_cancelamentos['total']); ?></h3>
+                        </div>
+                        <div class="col-12 col-sm-4">
+                            <span class="text-muted"><small>Valor que deixou de entrar</small></span>
+                            <h3 class="mb-0 text-warning">R$ <?php echo reais($ind_cancelamentos['valor']); ?></h3>
+                        </div>
+                        <div class="col-12 col-sm-4">
+                            <span class="text-muted"><small>Duração média do contrato</small></span>
+                            <h3 class="mb-0"><?php echo number_format($ind_cancelamentos['meses_medio'], 1, ',', '.'); ?> <small class="text-muted">meses</small></h3>
+                        </div>
+                    </div>
+
+                    <div class="row align-items-center">
+                        <div class="col-12 col-lg-5">
+                            <?php // A pizza responde "por que saem"; o Apex desenha legenda e percentual. ?>
+                            <div id="grafico_cancelamentos"></div>
+                        </div>
+                        <div class="col-12 col-lg-7">
+                            <p class="text-muted mb-2"><small>Valor por motivo &middot; quanto cada um custou no período</small></p>
+                            <?php foreach ($ind_cancelamentos['motivos'] as $motivo) {
+                                // Mesmo piso de 2% dos outros cards, condicionado a valor > 0: um
+                                // motivo pequeno ao lado de um grande arredondaria para zero e sumiria.
+                                $largura = ($canc_maior_valor > 0 && $motivo['valor'] > 0)
+                                    ? max(2, round(($motivo['valor'] / $canc_maior_valor) * 100))
+                                    : 0;
+                            ?>
+                                <div class="row align-items-center g-2 mb-2">
+                                    <div class="col-5 col-md-4 text-truncate" title="<?php echo htmlspecialchars($motivo['nome'], ENT_QUOTES, 'UTF-8'); ?>">
+                                        <small><?php echo htmlspecialchars($motivo['nome'], ENT_QUOTES, 'UTF-8'); ?></small>
+                                    </div>
+                                    <div class="col">
+                                        <div class="progress" style="height: 10px;">
+                                            <?php // A cor é a mesma da fatia: é o que liga uma barra à sua parte da pizza. ?>
+                                            <div class="progress-bar" role="progressbar" style="width: <?php echo (int) $largura; ?>%; background-color: <?php echo htmlspecialchars($motivo['cor'], ENT_QUOTES, 'UTF-8'); ?>;" aria-valuenow="<?php echo (int) $motivo['valor']; ?>" aria-valuemin="0" aria-valuemax="<?php echo (int) $canc_maior_valor; ?>" aria-label="<?php echo htmlspecialchars($motivo['nome'], ENT_QUOTES, 'UTF-8'); ?>"></div>
+                                        </div>
+                                    </div>
+                                    <div class="col-auto text-end" style="min-width: 96px;">
+                                        <small class="fw-bold">R$ <?php echo reais($motivo['valor']); ?></small>
+                                        <small class="d-block text-muted"><?php echo numero($motivo['quantidade']); ?> contrato(s)</small>
+                                    </div>
+                                </div>
+                            <?php } ?>
+                        </div>
+                    </div>
+
+                    <small class="text-muted d-block mt-2">
+                        O valor é o do ciclo cheio do contrato, sem rateio — a mesma conta das saídas do gráfico
+                        acima, no mesmo período. A duração média vai da criação do contrato até o encerramento.
+                    </small>
+                <?php } else { ?>
+                    <div class="alert alert-secondary mb-0" role="alert">
+                        <div class="alert-message">Nenhum contrato foi encerrado nos últimos <?php echo count($ind_movimento_meses); ?> meses nesta empresa.</div>
+                    </div>
+                <?php } ?>
+            </div>
+        </div>
+    </div>
+</div>
+
+<?php if (!empty($ind_cancelamentos['motivos'])) { ?>
+    <script>
+        // DOMContentLoaded, e não $(function(){}): o app.js que traz jQuery e o
+        // ApexCharts é carregado no footer, ou seja, DEPOIS desta view.
+        document.addEventListener("DOMContentLoaded", function() {
+            if (typeof ApexCharts === 'undefined') return;
+
+            var dados = <?php echo json_encode($canc_js, JSON_UNESCAPED_UNICODE); ?>;
+
+            new ApexCharts(document.querySelector("#grafico_cancelamentos"), {
+                chart: {
+                    type: 'donut',
+                    height: 280,
+                    // O tema do AppStack anima por padrão; aqui o gráfico é
+                    // leitura rápida, não apresentação.
+                    animations: { enabled: false }
+                },
+                series: dados.valores,
+                labels: dados.rotulos,
+                colors: dados.cores,
+                legend: { position: 'bottom' },
+                dataLabels: {
+                    formatter: function(pct) {
+                        // Uma casa decimal, como os percentuais dos outros
+                        // cards, e vírgula decimal para não destoar da tela.
+                        return pct.toFixed(1).replace('.', ',') + '%';
+                    }
+                },
+                tooltip: {
+                    y: {
+                        formatter: function(valor) {
+                            return valor + ' contrato(s)';
+                        }
+                    }
+                },
+                noData: { text: 'Sem cancelamentos no período.' }
+            }).render();
+        });
+    </script>
+<?php } ?>
 
 <div class="row">
     <div class="col-12 d-flex">

@@ -18,6 +18,56 @@ class Servidores extends MY_Controller
   /** Registros por página nas listagens. */
   const PER_PAGE = 30;
 
+  /**
+   * Ordenações oferecidas na listagem de domínios.
+   *
+   * Allowlist, e não string livre da tela: o valor vai direto para o
+   * `order_by()` do CI3. A chave é o que trafega no POST e fica na sessão; o
+   * valor é a ordenação, sempre com `id desc` de desempate — `domain` não é
+   * único (a UNIQUE é `id_server, domain`), então sem critério estável o mesmo
+   * domínio em dois servidores troca de lugar entre uma página e outra, sumindo
+   * das duas ou aparecendo nas duas.
+   *
+   * `whois_expiration_sort` é coluna derivada da `crm_servers_domains_v`
+   * (migration 027) e não a data crua: NULL ordena primeiro no ASC e 81% da base
+   * está sem vencimento, e expressão no ORDER BY seria escapada pelo
+   * `protect_identifiers` do CI3 como se fosse nome de coluna.
+   *
+   * `last_sync asc` traz NULL primeiro de propósito: nunca sincronizado É o mais
+   * atrasado de todos. Nas duas `desc`, o MySQL já joga NULL para o fim.
+   */
+  const ORDENACOES_DOMINIOS = [
+    'domain' => 'domain asc, id desc',
+    'vencimento' => 'whois_expiration_sort asc, id desc',
+    'sync_antigo' => 'last_sync asc, id desc',
+    'sync_recente' => 'last_sync desc, id desc',
+    'disco' => 'disk_used_mb desc, id desc',
+  ];
+
+  /** Rótulos das ordenações, na ordem em que aparecem no select. */
+  const ORDENACOES_DOMINIOS_ROTULOS = [
+    'domain' => 'Domínio (A-Z)',
+    'vencimento' => 'Vencimento mais próximo',
+    'sync_antigo' => 'Sincronizado há mais tempo',
+    'sync_recente' => 'Sincronizado mais recente',
+    'disco' => 'Maior uso de disco',
+  ];
+
+  /** Ordenação usada quando a sessão está vazia ou com valor desconhecido. */
+  const ORDENACAO_DOMINIOS_PADRAO = 'domain';
+
+  /**
+   * Chave de sessão da ordenação da listagem de domínios.
+   *
+   * SEPARADA de `f_server_domains` de propósito: o `Global_model::getFilter()`
+   * transforma cada chave daquele array em `WHERE <chave> = <valor>`, então uma
+   * chave `ordem` ali viraria `WHERE ordem = 'vencimento'` e derrubaria a
+   * listagem inteira — o mesmo acidente que a migration 015 evitou descartando o
+   * `id_status`. E o valor aqui é ESCALAR: esta chave nunca pode ser passada
+   * como `$filter` para o Global_model, que faria `foreach` sobre string.
+   */
+  const SESSAO_ORDENACAO_DOMINIOS = 'f_server_domains_ordem';
+
   public function __construct()
   {
     parent::__construct();
@@ -301,16 +351,21 @@ class Servidores extends MY_Controller
     $config['uri_segment'] = 3;
     $this->pagination->initialize($config);
 
+    // Ordenação composta no campo, com direção vazia: o order_by do CI3 quebra
+    // a string na vírgula e lê o ASC/DESC de cada pedaço, escapando os nomes de
+    // coluna — é assim que se ordena por dois campos pelo Global_model.
     $this->data['results'] = $this->global_model->getListW(
       $where,
       'crm_servers_domains_v',
       'f_server_domains',
-      'domain',
-      'asc',
+      self::ORDENACOES_DOMINIOS[$this->ordenacaoDominios()],
+      '',
       $config['per_page'],
       $this->uri->segment(3)
     );
 
+    $this->data['ordenacao_atual'] = $this->ordenacaoDominios();
+    $this->data['ordenacoes'] = self::ORDENACOES_DOMINIOS_ROTULOS;
     $this->data['total_results'] = $config['total_rows'];
     $this->data['est_count'] = $config['total_rows'];
     $this->data['servers'] = $this->global_model->getFieldsWhere_off(
@@ -384,8 +439,50 @@ class Servidores extends MY_Controller
     return $porDominio;
   }
 
+  /**
+   * Ordenação gravada na sessão, validada contra a allowlist.
+   *
+   * Valor desconhecido cai no padrão em vez de ir para o SQL: a chave da sessão
+   * sobrevive a deploy, e uma ordenação removida numa versão futura derrubaria a
+   * listagem de quem estivesse com ela escolhida.
+   *
+   * @return string chave de ORDENACOES_DOMINIOS
+   */
+  private function ordenacaoDominios()
+  {
+    $ordem = (string) $this->session->userdata(self::SESSAO_ORDENACAO_DOMINIOS);
+
+    return array_key_exists($ordem, self::ORDENACOES_DOMINIOS)
+      ? $ordem
+      : self::ORDENACAO_DOMINIOS_PADRAO;
+  }
+
   public function post_filtrar_dominios()
   {
+    // O botão LIMPAR zera a busca E os filtros do offcanvas de uma vez: com o
+    // formulário escondido, filtro esquecido lá dentro vira listagem
+    // inexplicavelmente vazia. A ordenação NÃO é zerada — ela não é filtro, não
+    // recorta nada e não tem chip; perder a ordem escolhida ao limpar uma busca
+    // seria efeito colateral sem motivo.
+    if ($this->input->post('acao') === 'limpar') {
+      $this->session->unset_userdata('f_server_domains');
+      redirect(base_url('servidores/dominios'));
+    }
+
+    // A ordem é lida ANTES da guarda do filtro: ela viaja fora do array
+    // `f_server_domains` (senão viraria WHERE ordem = ...), e um POST que traga
+    // só a ordem — o select num form próprio, com submit no onchange — cairia no
+    // redirect abaixo e a escolha seria descartada sem nenhuma mensagem.
+    $ordem = (string) $this->input->post('ordem');
+    if (array_key_exists($ordem, self::ORDENACOES_DOMINIOS)) {
+      $this->session->set_userdata(self::SESSAO_ORDENACAO_DOMINIOS, $ordem);
+    }
+
+    // O formulário do offcanvas SEMPRE envia os três selects (o "mostrar todos"
+    // é opção de valor vazio, não ausência do campo) e o da busca sempre envia a
+    // keyword — como as quatro chaves vivem no MESMO array, o array_merge
+    // preserva o que não veio no POST. Buscar não derruba o filtro do offcanvas,
+    // e filtrar não apaga a busca.
     if (empty($this->input->post('f_server_domains'))) redirect(base_url('servidores/dominios'));
     $array = array_merge((array) $this->session->userdata('f_server_domains'), $this->input->post('f_server_domains'));
     $this->session->set_userdata('f_server_domains', $array);

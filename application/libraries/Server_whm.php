@@ -110,6 +110,87 @@ class Server_whm
     }
 
     /**
+     * Suspende ou reativa uma CONTA do WHM.
+     *
+     * A unidade aqui é a conta (`user`), não o domínio: suspender derruba o
+     * domínio principal e todos os addons/subdomínios daquele usuário de uma
+     * vez. Quem decide se isso é aceitável é o chamador — o Server_model recusa
+     * a suspensão quando a mesma conta atende outro contrato vigente.
+     *
+     * @param  array       $config
+     * @param  string      $usuario  conta do cPanel (owner_username)
+     * @param  bool        $suspender TRUE suspende, FALSE reativa
+     * @param  string|null $motivo    só usado na suspensão
+     * @return array       success, message
+     */
+    public function setSuspension($config, $usuario, $suspender, $motivo = NULL)
+    {
+        $conta = trim((string) $usuario);
+        if ($conta === '') {
+            return ['success' => FALSE, 'message' => 'Conta do WHM não informada.'];
+        }
+
+        if ($suspender) {
+            $endpoint = '/json-api/suspendacct?api.version=1&user=' . rawurlencode($conta);
+            if ($motivo !== NULL && trim((string) $motivo) !== '') {
+                $endpoint .= '&reason=' . rawurlencode(trim((string) $motivo));
+            }
+        } else {
+            $endpoint = '/json-api/unsuspendacct?api.version=1&user=' . rawurlencode($conta);
+        }
+
+        $resposta = $this->request($config, $endpoint);
+        if (empty($resposta['success'])) {
+            return ['success' => FALSE, 'message' => $resposta['message']];
+        }
+
+        return $this->resultadoAcao($resposta['data'], $suspender);
+    }
+
+    /**
+     * Lê o resultado de uma ação (suspendacct/unsuspendacct) da resposta do WHM.
+     *
+     * Formato desconhecido NÃO é tratado como sucesso: a API devolve HTTP 200
+     * mesmo quando a operação falha (a falha vem no corpo), então assumir "deu
+     * certo" por não reconhecer o envelope esconderia justamente o caso que
+     * interessa — a conta continuar no ar depois de o contrato ser encerrado.
+     *
+     * @param  array $dados
+     * @param  bool  $suspender
+     * @return array success, message
+     */
+    private function resultadoAcao($dados, $suspender)
+    {
+        $falha = $suspender ? 'Falha ao suspender a conta no WHM' : 'Falha ao reativar a conta no WHM';
+
+        // api.version=1: { metadata: { result: 1, reason: "OK" } }
+        if (isset($dados['metadata']) && is_array($dados['metadata']) && isset($dados['metadata']['result'])) {
+            $razao = isset($dados['metadata']['reason']) ? trim((string) $dados['metadata']['reason']) : '';
+            if ((int) $dados['metadata']['result'] === 1) {
+                return ['success' => TRUE, 'message' => $razao];
+            }
+            return ['success' => FALSE, 'message' => $falha . ($razao !== '' ? ': ' . $razao : '.')];
+        }
+
+        // Formato antigo: { result: [ { status: 1, statusmsg: "..." } ] }
+        if (isset($dados['result'])) {
+            $primeiro = is_array($dados['result']) && isset($dados['result'][0]) && is_array($dados['result'][0])
+                ? $dados['result'][0]
+                : $dados['result'];
+
+            if (is_array($primeiro) && isset($primeiro['status'])) {
+                $mensagem = isset($primeiro['statusmsg']) ? trim((string) $primeiro['statusmsg']) : '';
+                if ((int) $primeiro['status'] === 1) {
+                    return ['success' => TRUE, 'message' => $mensagem];
+                }
+                return ['success' => FALSE, 'message' => $falha . ($mensagem !== '' ? ': ' . $mensagem : '.')];
+            }
+        }
+
+        return ['success' => FALSE, 'message' => $falha . ': resposta em formato não reconhecido.'];
+    }
+
+    /**
      * Converte o formato de disco do WHM ("512M", "2G", "unlimited") para MB.
      *
      * @param  mixed $valor

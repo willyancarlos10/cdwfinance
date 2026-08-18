@@ -15,7 +15,7 @@ use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
  * O escopo é sempre a empresa selecionada no filtro do topo
  * (getCurrentCompanyId), como em Servidores. Cliente não acessa o sistema:
  * este módulo é só o cadastro; contratos, contatos, anexos, atividades e
- * extrato financeiro entram depois como módulos próprios (a tela de visão
+ * Extrato Bom Controle entram depois como módulos próprios (a tela de visão
  * geral já reserva os cards).
  *
  * Os campos físicos de crm_customers cobrem identificação e endereço
@@ -174,6 +174,11 @@ class Clientes extends MY_Controller
         // Allowlist: a situação entra na cláusula SQL, então valor desconhecido
         // é descartado em vez de virar filtro nenhum por acidente mais adiante.
         'situation' => array_key_exists($situacao, $this->contractSituations()) ? $situacao : '',
+        // O switch é booleano e vem do formulário do offcanvas com um hidden de
+        // valor 0 na frente, para a chave existir também quando ele está
+        // desmarcado — checkbox desmarcado não é enviado, e sem o hidden a
+        // ausência da chave seria indistinguível de "não veio deste form".
+        'bomcontrole_unlinked' => empty($avancado['bomcontrole_unlinked']) ? 0 : 1,
       ]);
     }
 
@@ -668,7 +673,7 @@ class Clientes extends MY_Controller
     $this->data['cycles'] = $this->cycles();
     $this->data['service_types'] = $this->global_model->getWhereOrderBy_off('crm_service_types', ['id_status' => 1], 'name', 'asc', FALSE);
 
-    // Aba Extrato financeiro: só uma leitura de banco (sem rede) — a aba
+    // Aba Extrato Bom Controle: só uma leitura de banco (sem rede) — a aba
     // mostra o aviso de integração desativada sem esperar o AJAX do extrato.
     $this->load->model('bomcontrole_model');
     $this->data['bomcontrole_ativo'] = $this->bomcontrole_model->isActive((int) $this->getCurrentCompanyId());
@@ -913,7 +918,7 @@ class Clientes extends MY_Controller
   }
 
   /**
-   * Extrato financeiro consolidado do cliente: agrega, ao vivo, o extrato de
+   * Extrato Bom Controle consolidado do cliente: agrega, ao vivo, o extrato de
    * todos os contratos vinculados ao Bom Controle. O vínculo em si é feito na
    * tela do contrato — aqui é só leitura.
    */
@@ -1069,6 +1074,59 @@ class Clientes extends MY_Controller
     ];
   }
 
+  /**
+   * Uma página das faturas do CDW Finance de TODOS os contratos deste cliente.
+   *
+   * A `crm_invoices` carrega `id_customer` desde a 024 — copiado do contrato
+   * justamente para o recorte por cliente não precisar juntar `crm_contracts`
+   * (mesmo motivo do `id_customer` na `crm_contracts_domains_v` da 011).
+   */
+  public function json_postfaturas()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $id = (int) $this->input->post('id');
+    if ($id <= 0) {
+      echo json_encode($this->jsonErro('ID inválido.', ['id' => 'ID inválido.']));
+      return;
+    }
+
+    // O id vem do POST: sem esta conferência, um id de outro tenant traria as
+    // faturas dele.
+    $cliente = $this->global_model->getWhere_off('crm_customers', [
+      'id' => $id,
+      'id_company' => (int) $this->getCurrentCompanyId(),
+    ], TRUE);
+
+    if (empty($cliente)) {
+      echo json_encode($this->jsonErro('Cliente não encontrado.'));
+      return;
+    }
+
+    $this->load->model('invoice_model');
+    $pagina = $this->invoice_model->listarPorEscopo(
+      'cliente',
+      $id,
+      (int) $this->getCurrentCompanyId(),
+      (int) $this->input->post('pagina')
+    );
+
+    if ($pagina === NULL) {
+      echo json_encode($this->jsonErro('Escopo inválido.'));
+      return;
+    }
+
+    $pagina['situations'] = $this->invoice_model->situations();
+
+    echo json_encode([
+      'success' => TRUE,
+      'return' => TRUE,
+      'message' => '',
+      'data' => $pagina,
+      'errors' => [],
+    ]);
+  }
+
   // ------------------------------------------------------------------
   // Apoio
   // ------------------------------------------------------------------
@@ -1093,6 +1151,7 @@ class Clientes extends MY_Controller
     if (!is_array($avancado)) $avancado = [];
     if (!array_key_exists('id_service_type', $avancado)) $avancado['id_service_type'] = 0;
     if (!array_key_exists('situation', $avancado)) $avancado['situation'] = '';
+    if (!array_key_exists('bomcontrole_unlinked', $avancado)) $avancado['bomcontrole_unlinked'] = 0;
 
     $this->session->set_userdata(self::FILTRO_AVANCADO, $avancado);
   }
@@ -1142,6 +1201,15 @@ class Clientes extends MY_Controller
     $situacao = isset($avancado['situation']) ? (string) $avancado['situation'] : '';
     if ($situacao === 'com_vigente') $where .= ' AND active_contracts_count > 0';
     if ($situacao === 'sem_vigente') $where .= ' AND active_contracts_count = 0';
+
+    // Pendência de integração: cliente com contrato que o Bom Controle cobra e
+    // que ninguém vinculou ainda. A coluna é derivada na `crm_customers_v`
+    // (migration 026) e já exclui o que não é pendência — contrato encerrado e
+    // contrato migrado para o faturamento próprio (`billing_source`).
+    // "Tem contrato" está implícito no `> 0`: sem contrato, a contagem é zero.
+    if (!empty($avancado['bomcontrole_unlinked'])) {
+      $where .= ' AND bomcontrole_unlinked_contracts_count > 0';
+    }
 
     return $where;
   }
