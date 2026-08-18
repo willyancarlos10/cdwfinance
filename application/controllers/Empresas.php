@@ -243,6 +243,14 @@ class Empresas extends MY_Controller
     $this->data['bomcontrole_key_set'] = $this->bomcontrole_model->hasKey((int) $id);
     $this->data['crypto_ready'] = $this->secret_crypto->isReady();
 
+    // Aba PSP: uma seção por provedor da allowlist, para o PSP novo
+    // aparecer sozinho. As credenciais NÃO vêm para a tela — daqui sai só
+    // o "tem segredo?" e a validade do certificado.
+    $this->load->model('psp_model');
+    $this->data['psp_providers'] = $this->psp_model->providers();
+    $this->data['psp_accounts'] = $this->psp_model->contasDaEmpresa((int) $id);
+
+
     $this->load->view('header', $this->data);
     $this->load->view('companies/info', $this->data);
     $this->load->view('footer', $this->data);
@@ -393,6 +401,238 @@ class Empresas extends MY_Controller
       'message' => $resultado['message'],
       'data' => NULL,
       'errors' => !empty($resultado['success']) ? [] : ['bomcontrole' => $resultado['message']],
+    ]);
+  }
+
+  /**
+   * Salva a credencial de um PSP da empresa.
+   *
+   * Um form por PSP: o slug vem num hidden e é validado contra a allowlist do
+   * Psp_model. Slug fora dela é ERRO, e não "usa o primeiro" — a credencial
+   * iria parar no provedor errado.
+   */
+  public function post_psp()
+  {
+    $idCompany = (int) $this->input->post('id');
+    $psp = trim((string) $this->input->post('psp'));
+
+    $this->load->model('psp_model');
+    $providers = $this->psp_model->providers();
+
+    if ($psp === '' || !isset($providers[$psp])) {
+      $this->session->set_flashdata('error', 'Provedor de cobrança desconhecido.');
+      redirect(base_url('empresas/info?id=' . $idCompany . '#tab_psp'));
+    }
+
+    $destino = base_url('empresas/info?id=' . $idCompany . '#tab_psp');
+
+    $input = $this->input->post('psp_config');
+    if (!is_array($input)) {
+      $input = [];
+    }
+
+    // O secret vem FORA do array para ser lido sem xss_clean (segundo
+    // parâmetro FALSE): o filtro reescreveria em silêncio um segredo com
+    // sequência suspeita, e a corrupção só apareceria na primeira chamada à
+    // API. Mesmo motivo do bomcontrole_api_key acima.
+    $secret = trim((string) $this->input->post('psp_client_secret', FALSE));
+    if ($secret !== '' && mb_strlen($secret) > 255) {
+      $this->session->set_flashdata('error', 'O Client Secret deve ter no máximo 255 caracteres.');
+      redirect($destino);
+    }
+
+    $resultado = $this->psp_model->salvarConfig(
+      $idCompany,
+      $psp,
+      [
+        'active' => !empty($input['active']),
+        'environment' => (string) ($input['environment'] ?? 'sandbox'),
+        'client_id' => (string) ($input['client_id'] ?? ''),
+        'conta_corrente' => (string) ($input['conta_corrente'] ?? ''),
+        'client_secret' => $secret !== '' ? $secret : NULL, // em branco = manter
+      ],
+      (int) $this->session->userdata('user')->id
+    );
+
+    if (!$resultado['success']) {
+      $this->session->set_flashdata('error', $resultado['message']);
+      redirect($destino);
+    }
+
+    $avisoCert = $this->salvarCertificadoDoPost($idCompany, $psp);
+    if ($avisoCert === FALSE) {
+      redirect($destino);
+    }
+
+    // A mensagem declara o ESTADO RESULTANTE: "salvo com sucesso" genérico,
+    // com o campo de secret voltando em branco, não distingue "gravou" de
+    // "não gravou nada".
+    $this->session->set_flashdata('success', sprintf(
+      'Integração %s %s para esta empresa. %s%s',
+      $providers[$psp]['nome'],
+      !empty($input['active']) ? 'ATIVADA' : 'DESATIVADA',
+      $secret !== ''
+        ? 'Client Secret gravado.'
+        : 'O Client Secret cadastrado foi mantido.',
+      $avisoCert
+    ));
+
+    redirect($destino);
+  }
+
+  /**
+   * Lê o par .crt/.key do POST, quando enviado.
+   *
+   * Os dois andam juntos de propósito: gravar só o certificado deixaria a
+   * conta com um par que não casa, e o erro apareceria como falha de TLS
+   * obscura na primeira emissão.
+   *
+   * @param  int    $idCompany
+   * @param  string $psp
+   * @return string|bool texto a somar ao flash; FALSE quando reprovou
+   */
+  private function salvarCertificadoDoPost($idCompany, $psp)
+  {
+    $temCert = !empty($_FILES['psp_cert']['tmp_name']) && is_uploaded_file($_FILES['psp_cert']['tmp_name']);
+    $temChave = !empty($_FILES['psp_key']['tmp_name']) && is_uploaded_file($_FILES['psp_key']['tmp_name']);
+
+    if (!$temCert && !$temChave) {
+      return ''; // nada enviado: mantém o par atual
+    }
+
+    if (!$temCert || !$temChave) {
+      $this->session->set_flashdata('error', 'Envie o certificado (.crt) e a chave (.key) juntos — um sem o outro deixaria o par inconsistente.');
+      return FALSE;
+    }
+
+    $pemCert = (string) @file_get_contents($_FILES['psp_cert']['tmp_name']);
+    $pemChave = (string) @file_get_contents($_FILES['psp_key']['tmp_name']);
+
+    $resultado = $this->psp_model->salvarCertificado(
+      $idCompany,
+      $psp,
+      $pemCert,
+      $pemChave,
+      (int) $this->session->userdata('user')->id
+    );
+
+    if (!$resultado['success']) {
+      $this->session->set_flashdata('error', $resultado['message']);
+      return FALSE;
+    }
+
+    return !empty($resultado['expira_em'])
+      ? ' Certificado gravado (válido até ' . date('d/m/Y', strtotime($resultado['expira_em'])) . ').'
+      : ' Certificado gravado.';
+  }
+
+  public function json_postrevelarpsp()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+    // Resposta com segredo não pode ficar em cache de navegador ou proxy.
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    header('Pragma: no-cache');
+
+    $idCompany = (int) $this->input->post('id');
+    $psp = trim((string) $this->input->post('psp'));
+
+    if ($idCompany <= 0) {
+      echo json_encode([
+        'success' => FALSE,
+        'return' => FALSE,
+        'message' => 'Empresa inválida.',
+        'data' => NULL,
+        'errors' => ['psp' => 'Empresa inválida.'],
+      ]);
+      return;
+    }
+
+    $this->load->model('psp_model');
+    $providers = $this->psp_model->providers();
+
+    if ($psp === '' || !isset($providers[$psp])) {
+      echo json_encode([
+        'success' => FALSE,
+        'return' => FALSE,
+        'message' => 'Provedor de cobrança desconhecido.',
+        'data' => NULL,
+        'errors' => ['psp' => 'Provedor desconhecido.'],
+      ]);
+      return;
+    }
+
+    $secret = $this->psp_model->getClientSecret($idCompany, $psp);
+
+    if ($secret === FALSE) {
+      echo json_encode([
+        'success' => FALSE,
+        'return' => FALSE,
+        'message' => 'Não foi possível decifrar o Client Secret. A chave de criptografia (secret_crypto_key) pode ter sido trocada — recadastre o segredo.',
+        'data' => NULL,
+        'errors' => ['psp' => 'Segredo ilegível.'],
+      ]);
+      return;
+    }
+
+    if ($secret === '') {
+      echo json_encode([
+        'success' => FALSE,
+        'return' => FALSE,
+        'message' => 'Nenhum Client Secret cadastrado.',
+        'data' => NULL,
+        'errors' => ['psp' => 'Nenhum segredo cadastrado.'],
+      ]);
+      return;
+    }
+
+    $usuario = $this->session->userdata('user');
+    log_message('error', sprintf(
+      '[CREDENCIAL] Usuário %d (%s) visualizou o Client Secret do PSP %s da empresa %d a partir do IP %s.',
+      (int) $usuario->id,
+      isset($usuario->name) ? $usuario->name : '?',
+      $psp,
+      $idCompany,
+      $this->input->ip_address()
+    ));
+
+    echo json_encode([
+      'success' => TRUE,
+      'return' => TRUE,
+      'message' => 'Client Secret exibido.',
+      'data' => ['psp_client_secret' => $secret],
+      'errors' => [],
+    ]);
+  }
+
+  public function json_posttestarpsp()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $idCompany = (int) $this->input->post('id');
+    $psp = trim((string) $this->input->post('psp'));
+
+    if ($idCompany <= 0) {
+      echo json_encode([
+        'success' => FALSE,
+        'return' => FALSE,
+        'message' => 'Empresa inválida.',
+        'data' => NULL,
+        'errors' => ['psp' => 'Empresa inválida.'],
+      ]);
+      return;
+    }
+
+    // Testa a credencial JÁ SALVA — nunca uma digitada, que pode estar em
+    // branco justamente porque o usuário quer manter a atual.
+    $this->load->model('psp_model');
+    $resultado = $this->psp_model->testConnection($idCompany, $psp);
+
+    echo json_encode([
+      'success' => !empty($resultado['success']),
+      'return' => !empty($resultado['success']),
+      'message' => $resultado['message'],
+      'data' => NULL,
+      'errors' => !empty($resultado['success']) ? [] : ['psp' => $resultado['message']],
     ]);
   }
 

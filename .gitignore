@@ -45,3 +45,8 @@ application/config/database.php
 
 .vscode
 application/logs/*
+
+# Certificados mTLS dos PSPs (chave privada — nunca versionar).
+# O conteúdo é reenviado pela tela da empresa; o .htaccess da pasta é gerado
+# pelo Psp_model.
+application/certs/

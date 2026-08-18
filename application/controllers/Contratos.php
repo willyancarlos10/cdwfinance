@@ -153,6 +153,35 @@ class Contratos extends MY_Controller
 
     $this->data['invoice_policies'] = $this->invoicePolicies();
     $this->data['adjustment_indexes'] = $this->adjustmentIndexes();
+
+    // O select do PSP mostra só os provedores com credencial ATIVA no tenant:
+    // oferecer um sem credencial deixaria o contrato configurado para faturar
+    // por um caminho que falha em toda emissão, uma fatura por vez.
+    // O PSP já gravado entra na lista mesmo se a credencial for desativada
+    // depois — senão o SALVAR seguinte trocaria o provedor do contrato em
+    // silêncio, e as faturas antigas ficariam apontando para outro lugar.
+    $this->load->model('psp_model');
+    $pspDisponiveis = [];
+    foreach ($this->psp_model->rotulos() as $pspSlug => $pspNome) {
+      if ($this->psp_model->isActive((int) $this->data['result']->id_company, $pspSlug)) {
+        $pspDisponiveis[$pspSlug] = $pspNome;
+      }
+    }
+    $pspAtual = (string) $this->data['result']->psp;
+    if ($pspAtual !== '' && !isset($pspDisponiveis[$pspAtual])) {
+      $pspDisponiveis[$pspAtual] = $this->psp_model->rotulo($pspAtual) . ' (credencial inativa)';
+    }
+    $this->data['psp_disponiveis'] = $pspDisponiveis;
+    // Contagem para o badge da aba: a lista é lazy (só busca ao abrir a
+    // aba), então sem este número a tela não sabe dizer se há faturas antes
+    // de alguém clicar — que é justamente o que o badge existe para responder.
+    $this->load->model('invoice_model');
+    $this->data['faturas_count'] = (int) $this->invoice_model->contarPorEscopo(
+      'contrato',
+      (int) $this->data['result']->id,
+      (int) $this->data['result']->id_company
+    );
+
     // As faturas do contrato vivem na aba Faturas, carregadas por AJAX e
     // paginadas (Contratos::json_postfaturas). Traziam-se todas aqui, sem
     // limite: um contrato mensal antigo carregava dezenas de linhas em toda
@@ -451,6 +480,28 @@ class Contratos extends MY_Controller
       return FALSE;
     }
 
+    // O PSP é exigido aqui, ao lado do dia de vencimento, porque desde a
+    // migration 029 "a fatura É o boleto": faturar sem provedor produziria uma
+    // fatura que ninguém consegue pagar. Slug fora da allowlist é ERRO, nunca
+    // "usa o primeiro" — a cobrança iria para o provedor errado.
+    $this->load->model('psp_model');
+    $psp = $campo('psp');
+
+    if ($psp === '' || !array_key_exists($psp, $this->psp_model->providers())) {
+      $this->session->set_flashdata('warning', 'Escolha o provedor de cobrança (PSP) deste contrato.');
+      return FALSE;
+    }
+
+    // Sem credencial ativa não adianta salvar: o contrato entraria na rodada e
+    // toda fatura falharia na emissão, uma por uma, sem ninguém olhando.
+    if (!$this->psp_model->isActive((int) $contrato->id_company, $psp)) {
+      $this->session->set_flashdata('warning', sprintf(
+        'A integração com o %s não está ativa para esta empresa. Cadastre e ative a credencial em Empresas › aba Cobrança (PSP) antes de faturar por aqui.',
+        $this->psp_model->rotulo($psp)
+      ));
+      return FALSE;
+    }
+
     $this->load->model('invoice_model');
 
     // Conferência estrita, no mesmo padrão da data de criação do contrato e do
@@ -477,6 +528,7 @@ class Contratos extends MY_Controller
 
     $dados = [
       'billing_day' => $dia,
+      'psp' => $psp,
       'next_competence' => substr($competencia, 0, 8) . '01',
       'installments' => $parcelas,
     ];
@@ -617,6 +669,53 @@ class Contratos extends MY_Controller
     $mensagem = $resultado['success']
       ? ($geradas > 0 ? $geradas . ' fatura(s) gerada(s).' : 'Nenhuma competência pendente — as faturas deste contrato já foram geradas.')
       : $resultado['message'];
+
+    // Gerou: tenta registrar a cobrança JÁ, pela mesma regra que o cron usa —
+    // só que com escopo neste contrato e orçamento de tela.
+    //
+    // A falha NÃO desfaz nem impede a fatura: ela já está gravada e protegida
+    // pela UNIQUE, e a fatura sem cobrança é exatamente o que a fila do cron
+    // procura. Por isso a mensagem de erro diz que a rodada seguinte tenta de
+    // novo — sem isso o usuário acharia que precisa gerar tudo outra vez, e
+    // gerar de novo é o único caminho que produziria cobrança duplicada.
+    if ($resultado['success'] && $geradas > 0) {
+      $this->load->model('psp_model');
+
+      $cobranca = $this->psp_model->processarPendentes([
+        'id_user' => (int) $this->session->userdata('user')->id,
+        'id_company' => (int) $this->getCurrentCompanyId(),
+        'id_contract' => $id,
+        'limite' => Psp_model::MAX_COBRANCAS_NA_TELA,
+        'orcamento' => Psp_model::ORCAMENTO_COBRANCAS_TELA_SEGUNDOS,
+      ]);
+
+      // A SEVERIDADE acompanha o que de fato aconteceu. Emitir tudo como
+      // 'success' pintava de verde, com ícone de confirmação, uma mensagem que
+      // dizia que a cobrança falhou — o alerta contradizia o próprio texto.
+      $severidade = 'success';
+
+      if ((int) $cobranca['falhas'] > 0) {
+        $severidade = 'warning';
+        // O texto cru do banco NÃO entra no aviso: ele é longo, estoura o
+        // balão do toast (que corta no meio da frase) e não diz nada ao
+        // usuário além de "deu erro lá". O diagnóstico completo fica no log
+        // [PSP], que é o canal para isso; aqui vale o que dá para AGIR.
+        $mensagem .= ' A cobrança no banco não pôde ser registrada agora — a fatura'
+          . ' está criada e a próxima rodada do cron tenta de novo.';
+      } elseif ((int) $cobranca['registradas'] > 0) {
+        $mensagem .= ' Cobrança registrada no banco.';
+      } elseif (!empty($cobranca['restaram'])) {
+        $mensagem .= ' O registro da cobrança ficou para a próxima rodada do cron.';
+      }
+
+      // A tela recarrega para a fatura nova aparecer na aba Faturas, e um
+      // toast disparado pelo JS morreria nesse reload — foi por isso que o
+      // sucesso parecia silencioso, enquanto o erro (que não recarrega)
+      // aparecia. A mensagem vai por flashdata, e o textoParaFlash é
+      // obrigatório porque o header.php injeta o texto numa string JS entre
+      // aspas duplas SEM escapar.
+      $this->session->set_flashdata($severidade, $this->textoParaFlash($mensagem));
+    }
 
     echo json_encode([
       'success' => (bool) $resultado['success'],
@@ -837,10 +936,12 @@ class Contratos extends MY_Controller
    * virar 'vigente' por descuido.
    *
    * A parada do serviço acompanha a parada do contrato: SUSPENDER suspende nos
-   * painéis as contas dos domínios vinculados e REATIVAR devolve. O status
-   * local muda de qualquer jeito — painel fora do ar não pode impedir o
-   * financeiro de registrar a suspensão —, e o que não foi aplicado é listado
-   * na tela para o operador resolver no painel.
+   * painéis as contas dos domínios vinculados e REATIVAR devolve. E o status
+   * local só muda depois de o painel confirmar TODAS as contas: falha de
+   * painel ABORTA a operação (ver suspensaoImpede()). Registrar a suspensão
+   * com a conta no ar dava ao financeiro um contrato suspenso e ao cliente um
+   * serviço funcionando, que é o contrário do que a funcionalidade existe para
+   * garantir.
    */
   public function post_status()
   {
@@ -873,6 +974,19 @@ class Contratos extends MY_Controller
       (int) $this->session->userdata('user')->id
     );
 
+    // O contrato só muda de estado depois de o painel confirmar TODAS as
+    // contas. Uma falha aqui deixava o contrato suspenso com o serviço no ar —
+    // o buraco que a suspensão automática existe justamente para fechar.
+    if ($this->suspensaoImpede($suspensao)) {
+      log_message('error', '[SUSPENSAO] Status do contrato NÃO alterado (' . $acao . ') — tenant '
+        . (int) $this->getCurrentCompanyId() . ', contrato ' . $id . ', falhas: ' . count($suspensao['falhas'])
+        . ', não processadas: ' . (int) $suspensao['nao_processadas']
+        . ', já aplicadas: ' . (int) $suspensao['contas_ok']);
+
+      $this->session->set_flashdata('error', $this->erroSuspensao($suspensao, $transicoes[$acao]['nao_feito']));
+      redirect(base_url('contratos/info?id=' . $id));
+    }
+
     $this->global_model->edit('crm_contracts', [
       'status' => $transicoes[$acao]['para'],
       'modified' => date('Y-m-d H:i:s'),
@@ -904,12 +1018,19 @@ class Contratos extends MY_Controller
    * ela aparece no card de domínios do Dashboard como pendência de destino, que
    * é o que ela de fato passou a ser.
    *
-   * O desvínculo é por conta, e não do contrato inteiro: o que não pôde ser
-   * suspenso continua vinculado, tanto para não sumir da tela quanto para a
-   * operação poder ser retomada (reabrir → encerrar de novo processa só o que
-   * sobrou). REABRIR não reativa nada, justamente porque o vínculo das contas
-   * já aplicadas não existe mais — encerramento é caminho de ida para o
-   * serviço, e cliente que volta gera contrato novo.
+   * Falha de painel ABORTA o encerramento, como na suspensão: nada é gravado e
+   * nada é desvinculado. Aqui a regra pesa ainda mais — o contrato encerrado
+   * sai da carteira e ninguém o revisita, então a conta que ficou no ar ficaria
+   * lá para sempre.
+   *
+   * O desvínculo é por conta, e não do contrato inteiro: se numa tentativa
+   * anterior parte das contas caiu, a repetição da operação passa por elas de
+   * novo (o CloudPanel responde "já estava nesse estado" como sucesso; WHM e
+   * DirectAdmin aceitam a suspensão repetida) e o desvínculo só acontece
+   * quando tudo passa. REABRIR não reativa
+   * nada, justamente porque o vínculo das contas já aplicadas não existe mais —
+   * encerramento é caminho de ida para o serviço, e cliente que volta gera
+   * contrato novo.
    */
   public function post_encerrar()
   {
@@ -944,6 +1065,20 @@ class Contratos extends MY_Controller
       $idUser,
       'Contrato #' . $id . ' encerrado no CDW Finance'
     );
+
+    // Mesma regra do post_status: conta que não parou impede o encerramento.
+    // Encerrar com o serviço no ar é pior aqui do que na suspensão — o contrato
+    // sai da carteira, ninguém mais o revisita, e a conta fica no ar para
+    // sempre.
+    if ($this->suspensaoImpede($suspensao)) {
+      log_message('error', '[SUSPENSAO] Encerramento NÃO gravado — tenant ' . $idCompany
+        . ', contrato ' . $id . ', falhas: ' . count($suspensao['falhas'])
+        . ', não processadas: ' . (int) $suspensao['nao_processadas']
+        . ', já aplicadas: ' . (int) $suspensao['contas_ok']);
+
+      $this->session->set_flashdata('error', $this->erroSuspensao($suspensao, 'encerrado'));
+      redirect(base_url('contratos/info?id=' . $id));
+    }
 
     $agora = date('Y-m-d H:i:s');
     $desvincular = array_map('intval', $suspensao['ids_contract_domains']);
@@ -1073,51 +1208,138 @@ class Contratos extends MY_Controller
   }
 
   /**
-   * Lista o que ficou pendente nos painéis, para o alerta da tela.
+   * Diz se o resultado da suspensão IMPEDE a mudança de status do contrato.
    *
-   * Contas bloqueadas e falhas aparecem juntas porque a pergunta do operador é
-   * uma só ("o que eu ainda preciso fazer no painel?"), mas o motivo de cada
-   * uma vem escrito — conta compartilhada com contrato vigente é decisão do
-   * sistema, e não erro de rede.
+   * É a regra que faltava: o contrato só muda de estado depois de o painel
+   * confirmar TODAS as contas. Antes, uma falha ("you do not have access to an
+   * account named x") virava aviso amarelo e o contrato era suspenso do mesmo
+   * jeito — cliente com o serviço no ar e contrato marcado como suspenso ou
+   * encerrado é exatamente o buraco que a suspensão automática existe para
+   * fechar, e ninguém volta a um aviso que já foi fechado na tela.
+   *
+   * `nao_processadas` entra junto: conta que o orçamento de tempo não alcançou
+   * não foi verificada em painel nenhum, o que é indistinguível de falha para
+   * quem depende de o serviço parar.
+   *
+   * `bloqueados` NÃO entra, e a diferença é de natureza: conta compartilhada
+   * com outro contrato vigente é decisão DESTE sistema (suspender derrubaria o
+   * site de um cliente adimplente), não erro de painel. Como ela só se resolve
+   * encerrando o outro contrato, bloquear por causa dela travaria a suspensão
+   * para sempre, sem ação possível no painel — e o operador ficaria sem saída.
+   *
+   * @param  array $resultado
+   * @return bool
+   */
+  private function suspensaoImpede(array $resultado)
+  {
+    return !empty($resultado['falhas']) || (int) $resultado['nao_processadas'] > 0;
+  }
+
+  /**
+   * Mensagem de erro da operação abortada — o que falhou e o que fazer.
+   *
+   * Precisa dizer o que JÁ foi aplicado: abortar não desfaz o que o painel
+   * confirmou, e sem essa linha o operador leria "o contrato não foi suspenso"
+   * e concluiria que nada aconteceu, enquanto parte dos sites já está fora do
+   * ar.
+   *
+   * @param  array  $resultado
+   * @param  string $participioContrato 'suspenso' | 'reativado' | 'encerrado'
+   * @return string
+   */
+  private function erroSuspensao(array $resultado, $participioContrato)
+  {
+    $verbo = ($resultado['acao'] === 'suspender') ? 'suspender' : 'reativar';
+    $aplicadas = ($resultado['acao'] === 'suspender') ? 'suspensas' : 'reativadas';
+
+    $blocos = ['O contrato <strong>não foi ' . $participioContrato . '</strong>: não foi possível '
+      . $verbo . ' todas as contas nos painéis.'];
+
+    if (!empty($resultado['falhas'])) {
+      $itens = [];
+      foreach ($resultado['falhas'] as $falha) {
+        $itens[] = '<strong>' . $this->textoParaFlash($falha['servidor'] . ' — ' . $falha['conta'])
+          . '</strong>: ' . $this->textoParaFlash($falha['erro']);
+      }
+      $blocos[] = 'Contas com erro:<br>&bull; ' . implode('<br>&bull; ', $this->truncarPendencias($itens));
+    }
+
+    if ((int) $resultado['nao_processadas'] > 0) {
+      $blocos[] = (int) $resultado['nao_processadas'] . ' conta(s) não chegaram a ser processadas '
+        . '(tempo limite da requisição).';
+    }
+
+    if ((int) $resultado['contas_ok'] > 0) {
+      $blocos[] = '<strong>Atenção:</strong> ' . (int) $resultado['contas_ok'] . ' conta(s) já foram '
+        . $aplicadas . ' no painel e continuam assim.';
+    }
+
+    // As bloqueadas entram no corpo do erro, e não num warning à parte: os dois
+    // canais são Swal.fire no header e o segundo substituiria o primeiro na
+    // tela — o operador leria só metade do que aconteceu.
+    $bloqueadas = $this->avisoSuspensao($resultado);
+    if ($bloqueadas !== '') {
+      $blocos[] = $bloqueadas;
+    }
+
+    $blocos[] = 'Resolva as pendências pelo painel do servidor — ou, se a conta não existe mais, corrija o '
+      . 'vínculo do domínio na aba Domínios — e repita a operação.';
+
+    return implode('<br><br>', $blocos);
+  }
+
+  /**
+   * Lista o que o SISTEMA decidiu não aplicar, para o alerta da tela.
+   *
+   * Só as contas bloqueadas entram aqui. As falhas de painel saíram para o
+   * erroSuspensao(): desde que passaram a abortar a operação, misturar as duas
+   * numa lista só ("estas contas não foram suspensas") dizia a mesma coisa
+   * sobre situações de consequência oposta — uma impede o contrato de mudar de
+   * estado, a outra não.
    *
    * @param  array $resultado
    * @return string vazio quando não há nada a avisar
    */
   private function avisoSuspensao(array $resultado)
   {
-    $itens = [];
+    if (empty($resultado['bloqueados'])) {
+      return '';
+    }
 
+    $itens = [];
     foreach ($resultado['bloqueados'] as $bloqueado) {
       $itens[] = '<strong>' . $this->textoParaFlash($bloqueado['servidor'] . ' — ' . $bloqueado['conta'])
         . '</strong>: ' . $this->textoParaFlash($bloqueado['motivo']);
     }
 
-    foreach ($resultado['falhas'] as $falha) {
-      $itens[] = '<strong>' . $this->textoParaFlash($falha['servidor'] . ' — ' . $falha['conta'])
-        . '</strong>: ' . $this->textoParaFlash($falha['erro']);
+    // O texto não manda "resolver pelo painel" (como mandava quando esta lista
+    // também carregava as falhas): a conta compartilhada não tem o que resolver
+    // lá — o que a libera é o outro contrato deixar de ser vigente.
+    return 'Estas contas <strong>não</strong> foram '
+      . ($resultado['acao'] === 'suspender' ? 'suspensas' : 'reativadas')
+      . ', por decisão do sistema:<br>&bull; '
+      . implode('<br>&bull; ', $this->truncarPendencias($itens));
+  }
+
+  /**
+   * Corta a lista de pendências: um contrato com dezenas de contas
+   * transformaria o alerta numa parede de texto que ninguém lê. O log tem
+   * todas.
+   *
+   * @param  array $itens
+   * @return array
+   */
+  private function truncarPendencias(array $itens)
+  {
+    $total = count($itens);
+    if ($total <= self::LIMITE_AVISO_SUSPENSAO) {
+      return $itens;
     }
 
-    $pendentes = [];
-    if (!empty($itens)) {
-      // A lista é truncada: um contrato com dezenas de contas transformaria o
-      // alerta numa parede de texto que ninguém lê. O log tem todas.
-      $total = count($itens);
-      if ($total > self::LIMITE_AVISO_SUSPENSAO) {
-        $itens = array_slice($itens, 0, self::LIMITE_AVISO_SUSPENSAO);
-        $itens[] = 'e mais ' . ($total - self::LIMITE_AVISO_SUSPENSAO) . ' — veja o log do sistema.';
-      }
+    $itens = array_slice($itens, 0, self::LIMITE_AVISO_SUSPENSAO);
+    $itens[] = 'e mais ' . ($total - self::LIMITE_AVISO_SUSPENSAO) . ' — veja o log do sistema.';
 
-      $pendentes[] = 'Estas contas <strong>não</strong> foram '
-        . ($resultado['acao'] === 'suspender' ? 'suspensas' : 'reativadas')
-        . ' — resolva pelo painel do servidor:<br>&bull; ' . implode('<br>&bull; ', $itens);
-    }
-
-    if ((int) $resultado['nao_processadas'] > 0) {
-      $pendentes[] = (int) $resultado['nao_processadas'] . ' conta(s) não foram processadas nesta tentativa '
-        . '(tempo limite da requisição). Repita a operação para continuar de onde parou.';
-    }
-
-    return empty($pendentes) ? '' : implode('<br><br>', $pendentes);
+    return $itens;
   }
 
   /**
@@ -1866,13 +2088,17 @@ class Contratos extends MY_Controller
    * O encerramento NÃO está aqui de propósito: ele grava mais quatro campos
    * (data, motivo, observações, autor) e tem endpoint próprio.
    *
-   * @return array ação => ['de' => status exigido, 'para' => novo, 'ok' => msg]
+   * `nao_feito` é o particípio usado na mensagem de erro quando a operação é
+   * abortada por falha de painel ("O contrato NÃO foi suspenso"): o texto de
+   * sucesso é frase inteira e não serve para essa outra construção.
+   *
+   * @return array ação => ['de' => exigido, 'para' => novo, 'ok' => msg, 'nao_feito' => particípio]
    */
   private function statusTransicoes()
   {
     return [
-      'suspender' => ['de' => 'vigente', 'para' => 'suspenso', 'ok' => 'Contrato suspenso.'],
-      'reativar' => ['de' => 'suspenso', 'para' => 'vigente', 'ok' => 'Contrato reativado.'],
+      'suspender' => ['de' => 'vigente', 'para' => 'suspenso', 'ok' => 'Contrato suspenso.', 'nao_feito' => 'suspenso'],
+      'reativar' => ['de' => 'suspenso', 'para' => 'vigente', 'ok' => 'Contrato reativado.', 'nao_feito' => 'reativado'],
     ];
   }
 
@@ -2146,6 +2372,12 @@ class Contratos extends MY_Controller
 
     $pagina['situations'] = $this->invoice_model->situations();
     $pagina['fatura_aqui'] = ((string) $contrato->billing_source === 'cdwfinance');
+
+    // Rótulos do estado de REGISTRO (crm_invoices_v.registration): a aba
+    // precisa distinguir "sem boleto" de "boleto pronto", que é pergunta
+    // diferente da situação de pagamento.
+    $this->load->model('psp_model');
+    $pagina['registrations'] = $this->psp_model->registrationLabels();
 
     echo json_encode([
       'success' => TRUE,

@@ -301,3 +301,78 @@ da emissão assíncrona, que é o número que decide o desenho da etapa B.
 Etapas **E–G** do ROADMAP (emissão da NF pelo ERP, envio da NF, encerramento do `VendaContrato`) e a
 **H** (migrar os 402 contratos), que é operação. O gatilho da NF nasce na etapa C, mas a fila é
 trabalho à parte.
+
+---
+
+## Coluna "Boleto" — plano (18/08/2026)
+
+### O que a API do Inter entrega
+
+**Não existe URL pública do boleto.** O PDF sai de um endpoint **autenticado**
+(`GET /cobranca/v3/cobrancas/{codigoSolicitacao}/pdf`) e vem como **base64 dentro de um JSON**,
+não como binário direto. A library já tem `Psp_inter::obterPdf()`, que decodifica e devolve os bytes
+— mas **esse método nunca foi exercitado contra a conta real**, e o sandbox já corrigiu outras
+suposições da mesma fonte (o caminho do webhook, o envelope da listagem, o `Accept`). **Confirmar é
+o passo 1.**
+
+É por isso que `link_boleto` fica vazia no Inter: não há link a guardar. A coluna continua fazendo
+sentido para PSPs que publiquem URL — a tela deve preferir a URL quando houver e cair no arquivo
+quando não.
+
+### A consequência que decide o desenho
+
+Como o PDF só se obtém autenticado, **a tela não pode apontar para o banco**: é preciso um endpoint
+nosso que busque (ou sirva o arquivo já guardado) e faça o streaming.
+
+### Guardar ou buscar a cada clique?
+
+**Guardar.** Dois motivos, e o segundo é decisivo:
+
+1. **O boleto é imutável depois de emitido** — o PDF de hoje é o mesmo de amanhã. Rebuscar é pagar
+   uma chamada por uma resposta que não muda, contra um rate limit que estoura em ~6 seguidas.
+2. **A etapa B precisa do arquivo de qualquer forma**: o e-mail leva o boleto **anexo** (não há link
+   para mandar). Se o envio já vai baixar o PDF, buscar de novo no clique da tela é trabalho
+   duplicado.
+
+**Buscar sob demanda, guardar depois** — e não baixar no ato do registro: a maioria dos boletos nunca
+é aberta na tela, e baixar todos na rodada do cron gastaria quota para encher disco.
+
+### Onde guardar — e o que NÃO fazer
+
+⚠️ **Não pode ir em `images/`.** A pasta é servida pelo Apache e não tem `.htaccess`; um boleto ali
+fica acessível por URL, e o PDF traz **nome, documento, endereço e valor** do cliente. Nome
+"difícil de adivinhar" não resolve: basta o link vazar de um e-mail encaminhado.
+
+Vai para **`application/boletos/<id_company>/<ano>/<mes>/`**, que o `.htaccess` do `application/` já
+nega por inteiro — mesma proteção dos certificados do PSP, e pelo mesmo motivo.
+
+O acesso é por um controller que **confere o tenant** e faz o streaming. O caminho **nunca** vem da
+requisição: só o `id` da fatura, e o path sai da linha do banco (mesma regra da exclusão de anexos,
+que localiza pelo id e nunca pelo path do POST).
+
+### Peças
+
+| Peça | O quê |
+|---|---|
+| **Migration 036** | `crm_invoices.boleto_path` (caminho **relativo**, como o do certificado — absoluto quebra ao trocar de servidor) + recriar a `crm_invoices_v` |
+| `Psp_model::obterBoleto($idInvoice, $idCompany)` | devolve o arquivo: usa o guardado; senão baixa pelo provedor da **fatura** (`crm_invoices.psp`), grava e devolve |
+| `Faturas::boleto($id)` | streaming com `Content-Type: application/pdf` e `Content-Disposition: inline`, escopado por `getCurrentCompanyId()` |
+| Coluna **Boleto** | nas três telas (listagem, aba do contrato, aba do cliente), só quando `registration = 'registrada'` |
+
+### Regras que já dá para fixar
+
+- **Só fatura `registrada` tem boleto.** Em `registrando` o arquivo ainda não existe no banco, e o
+  botão levaria a um erro — o estado já diz para esperar.
+- **Cancelar a cobrança apaga o arquivo**, junto com a linha digitável e o PIX: ele descreve um
+  boleto que não existe mais, e é o mesmo motivo pelo qual aqueles campos já são limpos.
+- **Falha no download não vira erro de tela em branco**: a coluna mostra o aviso e mantém a linha
+  digitável, que é o que permite pagar sem o PDF.
+- O nome do arquivo entregue ao usuário sai da fatura (`boleto-<id>-<competencia>.pdf`), não do id
+  interno do PSP — quem baixa quer reconhecer o arquivo depois.
+
+### Ordem sugerida
+
+1. Confirmar o formato real do `/pdf` no sandbox (base64 em JSON? binário? outro nome de chave?).
+2. Migration 036 + `obterBoleto()` + o endpoint de streaming.
+3. A coluna nas três telas.
+4. A etapa B (e-mail) reusa `obterBoleto()` para anexar — sem baixar de novo.

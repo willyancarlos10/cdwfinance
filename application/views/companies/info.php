@@ -50,6 +50,7 @@
                     <li class="nav-item"><a class="nav-link active" href="#tab1" data-bs-toggle="tab" role="tab" aria-selected="true">Atividades <?php if (count($notes) > 0) echo '(' . count($notes) . ')'; ?></a></li>
                     <li class="nav-item"><a class="nav-link" href="#tab2" data-bs-toggle="tab" role="tab">Usuários <?php if (count($users) > 0) echo '(' . count($users) . ')'; ?></a></li>
                     <li class="nav-item"><a class="nav-link" href="#tab_bomcontrole" data-bs-toggle="tab" role="tab">Bom Controle</a></li>
+                    <li class="nav-item"><a class="nav-link" href="#tab_psp" data-bs-toggle="tab" role="tab">Cobrança (PSP)</a></li>
                     <li class="nav-item"><a class="nav-link" href="#tab3" data-bs-toggle="tab" role="tab">Histórico <?php if (count($logs) > 0) echo '(' . count($logs) . ')'; ?></a></li>
                 </ul>
                 <div class="tab-content">
@@ -171,6 +172,147 @@
                             <div class="alert-message">
                                 A chave é gerada no próprio Bom Controle e vale só para esta empresa. Com a integração ativa, os contratos dos clientes desta empresa podem ser vinculados aos contratos do Bom Controle e o Extrato Bom Controle passa a ser consultado por lá.
                                 <a href="https://documenter.getpostman.com/view/1797561/SWT7BKWo?version=latest" target="_blank" rel="noopener">Documentação da API</a>.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="tab-pane" id="tab_psp" role="tabpanel">
+                        <?php if (empty($crypto_ready)) { ?>
+                            <div class="alert alert-danger" role="alert">
+                                <div class="alert-message">
+                                    A chave de criptografia (<code>secret_crypto_key</code>) não está configurada — o Client Secret não pode ser gravado até isso ser resolvido.
+                                </div>
+                            </div>
+                        <?php } ?>
+                        <p class="text-muted">
+                            O PSP é quem registra a cobrança (boleto + PIX) e avisa quando o cliente paga.
+                            A escolha é <strong>por contrato</strong>, então mais de um provedor pode ficar ativo aqui ao mesmo tempo.
+                        </p>
+                        <?php foreach ($psp_providers as $psp_slug => $psp_def) {
+                            $psp_conta = isset($psp_accounts[$psp_slug]) ? $psp_accounts[$psp_slug] : NULL;
+                            $psp_tem_secret = !empty($psp_conta) && (string) $psp_conta->client_secret !== '';
+                            $psp_tem_cert = !empty($psp_conta) && (string) $psp_conta->cert_path !== '';
+                            $psp_dias = $this->psp_model->diasParaVencerCertificado($psp_conta);
+                            $psp_pronto = $psp_tem_secret && $psp_tem_cert;
+                        ?>
+                            <div class="card mb-3">
+                                <div class="card-header d-flex align-items-center justify-content-between">
+                                    <strong><?php echo htmlspecialchars($psp_def['nome'], ENT_QUOTES, 'UTF-8'); ?></strong>
+                                    <?php if (!empty($psp_conta) && (int) $psp_conta->active === 1) { ?>
+                                        <span class="badge bg-success">Ativo</span>
+                                    <?php } else { ?>
+                                        <span class="badge bg-secondary">Inativo</span>
+                                    <?php } ?>
+                                </div>
+                                <div class="card-body">
+                                    <form method="POST" action="<?php echo base_url('empresas/post_psp'); ?>" enctype="multipart/form-data">
+                                        <input type="hidden" name="id" value="<?php echo (int) $result->id; ?>">
+                                        <input type="hidden" name="psp" value="<?php echo htmlspecialchars($psp_slug, ENT_QUOTES, 'UTF-8'); ?>">
+
+                                        <div class="form-check form-switch mb-3">
+                                            <?php // O hidden garante que "desmarcado" chegue como 0 — checkbox ausente e desmarcado seriam iguais. ?>
+                                            <input type="hidden" name="psp_config[active]" value="0">
+                                            <input class="form-check-input" type="checkbox" role="switch" id="psp_active_<?php echo $psp_slug; ?>" name="psp_config[active]" value="1" <?php if (!empty($psp_conta) && (int) $psp_conta->active === 1) echo 'checked'; ?>>
+                                            <label class="form-check-label" for="psp_active_<?php echo $psp_slug; ?>">Integração ativa para esta empresa</label>
+                                        </div>
+
+                                        <div class="row">
+                                            <div class="col-md-4 mb-3">
+                                                <label class="form-label" for="psp_env_<?php echo $psp_slug; ?>">Ambiente</label>
+                                                <select class="form-select" id="psp_env_<?php echo $psp_slug; ?>" name="psp_config[environment]">
+                                                    <option value="sandbox" <?php if (empty($psp_conta) || (string) $psp_conta->environment !== 'producao') echo 'selected'; ?>>Sandbox (homologação)</option>
+                                                    <option value="producao" <?php if (!empty($psp_conta) && (string) $psp_conta->environment === 'producao') echo 'selected'; ?>>Produção</option>
+                                                </select>
+                                                <small class="text-muted">Sandbox e produção têm credenciais diferentes.</small>
+                                            </div>
+                                            <div class="col-md-8 mb-3">
+                                                <label class="form-label" for="psp_client_id_<?php echo $psp_slug; ?>">Client ID</label>
+                                                <input type="text" class="form-control" id="psp_client_id_<?php echo $psp_slug; ?>" name="psp_config[client_id]" maxlength="255" value="<?php echo htmlspecialchars(!empty($psp_conta) ? (string) $psp_conta->client_id : '', ENT_QUOTES, 'UTF-8'); ?>">
+                                            </div>
+                                        </div>
+
+                                        <div class="mb-3">
+                                            <label class="form-label" for="psp_client_secret_<?php echo $psp_slug; ?>">Client Secret</label>
+                                            <?php if ($psp_tem_secret) { ?>
+                                                <span class="badge bg-success ms-1">Segredo cadastrado</span>
+                                            <?php } else { ?>
+                                                <span class="badge bg-secondary ms-1">Nenhum segredo cadastrado</span>
+                                            <?php } ?>
+                                            <div class="input-group">
+                                                <input type="password" class="form-control" id="psp_client_secret_<?php echo $psp_slug; ?>" name="psp_client_secret" maxlength="255" autocomplete="new-password" data-lpignore="true" data-form-type="other" placeholder="<?php echo $psp_tem_secret ? 'Preencha apenas para alterar o segredo atual' : 'Informe o Client Secret'; ?>">
+                                                <button type="button" class="btn btn-outline-secondary btn-toggle-psp-secret" data-psp="<?php echo $psp_slug; ?>" data-key-set="<?php echo $psp_tem_secret ? '1' : '0'; ?>" title="Ver segredo salvo" aria-label="Ver segredo salvo">
+                                                    <i class="mdi mdi-eye"></i>
+                                                </button>
+                                            </div>
+                                            <div class="form-text text-warning d-none" id="aviso_revelado_psp_<?php echo $psp_slug; ?>">
+                                                <i class="fa fa-exclamation-triangle"></i> Segredo salvo visível. Clique no olho de novo para ocultá-lo e limpar o campo — em branco, o SALVAR mantém o atual.
+                                            </div>
+                                            <small class="text-muted">Gravado cifrado e nunca devolvido para a tela — por isso o campo nasce sempre em branco.</small>
+                                        </div>
+
+                                        <div class="mb-3">
+                                            <label class="form-label" for="psp_conta_<?php echo $psp_slug; ?>">Conta corrente <span class="text-muted">(opcional)</span></label>
+                                            <input type="text" class="form-control" id="psp_conta_<?php echo $psp_slug; ?>" name="psp_config[conta_corrente]" maxlength="30" value="<?php
+                                                $psp_extra = !empty($psp_conta) ? json_decode((string) $psp_conta->extra, TRUE) : [];
+                                                echo htmlspecialchars(is_array($psp_extra) && isset($psp_extra['conta_corrente']) ? (string) $psp_extra['conta_corrente'] : '', ENT_QUOTES, 'UTF-8');
+                                            ?>">
+                                            <small class="text-muted">Só é necessária quando a mesma integração atende mais de uma conta — em branco, o banco usa a conta padrão.</small>
+                                        </div>
+
+                                        <hr>
+
+                                        <div class="mb-2">
+                                            <label class="form-label mb-0">Certificado (mTLS)</label>
+                                            <?php if ($psp_tem_cert) { ?>
+                                                <span class="badge bg-success ms-1">Certificado cadastrado</span>
+                                                <?php if ($psp_dias !== NULL) { ?>
+                                                    <?php if ($psp_dias < 0) { ?>
+                                                        <span class="badge bg-danger ms-1">VENCIDO em <?php echo date('d/m/Y', strtotime((string) $psp_conta->cert_expires_at)); ?></span>
+                                                    <?php } elseif ($psp_dias <= 30) { ?>
+                                                        <span class="badge bg-warning text-dark ms-1">Vence em <?php echo (int) $psp_dias; ?> dia(s)</span>
+                                                    <?php } else { ?>
+                                                        <span class="badge bg-light text-dark ms-1">Válido até <?php echo date('d/m/Y', strtotime((string) $psp_conta->cert_expires_at)); ?></span>
+                                                    <?php } ?>
+                                                <?php } ?>
+                                            <?php } else { ?>
+                                                <span class="badge bg-secondary ms-1">Nenhum certificado</span>
+                                            <?php } ?>
+                                        </div>
+                                        <?php if ($psp_dias !== NULL && $psp_dias < 0) { ?>
+                                            <div class="alert alert-danger py-2" role="alert">
+                                                <div class="alert-message">
+                                                    O certificado venceu — <strong>todas</strong> as cobranças desta empresa neste provedor param até ele ser renovado no banco e reenviado aqui.
+                                                </div>
+                                            </div>
+                                        <?php } ?>
+                                        <div class="row">
+                                            <div class="col-md-6 mb-3">
+                                                <label class="form-label" for="psp_cert_<?php echo $psp_slug; ?>">Arquivo .crt</label>
+                                                <input type="file" class="form-control" id="psp_cert_<?php echo $psp_slug; ?>" name="psp_cert" accept=".crt,.pem,.cer">
+                                            </div>
+                                            <div class="col-md-6 mb-3">
+                                                <label class="form-label" for="psp_key_<?php echo $psp_slug; ?>">Arquivo .key</label>
+                                                <input type="file" class="form-control" id="psp_key_<?php echo $psp_slug; ?>" name="psp_key" accept=".key,.pem">
+                                            </div>
+                                        </div>
+                                        <small class="text-muted d-block mb-3">
+                                            Os dois arquivos são enviados juntos: o sistema confere que a chave corresponde ao certificado antes de gravar, e lê dele a data de validade.
+                                            Em branco, o par atual é mantido. A chave privada nunca é exibida depois de gravada.
+                                        </small>
+
+                                        <button type="submit" class="btn btn-primary btn-sm">SALVAR</button>
+                                        <button type="button" class="btn btn-outline-primary btn-sm btn-testar-psp" data-psp="<?php echo $psp_slug; ?>" <?php if (!$psp_pronto) echo 'disabled'; ?>>TESTAR CONEXÃO</button>
+                                        <?php if (!$psp_pronto) { ?>
+                                            <small class="text-muted ms-2">O teste exige Client Secret e certificado cadastrados.</small>
+                                        <?php } ?>
+                                    </form>
+                                    <div class="resultado-teste-psp mt-3" data-psp="<?php echo $psp_slug; ?>"></div>
+                                </div>
+                            </div>
+                        <?php } ?>
+                        <div class="alert alert-info mb-0" role="alert">
+                            <div class="alert-message">
+                                As credenciais são geradas no painel do próprio banco, por integração, com os escopos de cobrança marcados na criação — e valem só para esta empresa.
+                                O envio automático do boleto e a baixa por webhook ainda não estão implementados; por ora esta aba só guarda e testa a credencial.
                             </div>
                         </div>
                     </div>
@@ -719,5 +861,119 @@
                     $botao.prop('disabled', false);
                 });
         });
+
+        // --- Aba Cobrança (PSP) ---------------------------------------
+        // Os handlers são delegados por CLASSE, e não por id: a aba desenha um
+        // card por provedor da allowlist, então PSP novo passa a funcionar sem
+        // tocar neste JS.
+
+        // Olho do Client Secret — mesmo desenho do olho do Bom Controle:
+        // campo em branco + segredo salvo busca no servidor (o valor não vem
+        // no HTML da página); campo preenchido só mostra/esconde o digitado.
+        $('.btn-toggle-psp-secret').each(function() {
+            var $btn = $(this);
+            var psp = $btn.data('psp');
+            var $campo = $('#psp_client_secret_' + psp);
+            var $aviso = $('#aviso_revelado_psp_' + psp);
+            if (!$campo.length) {
+                return;
+            }
+
+            var temSegredoSalvo = $btn.data('key-set') === 1 || $btn.data('key-set') === '1';
+            // Distingue "visível porque veio do servidor" de "visível porque
+            // foi digitado" — só o primeiro caso limpa o campo ao ocultar.
+            var veioDoServidor = false;
+
+            function pintarBotao(visivel, revelado) {
+                $btn.find('i').removeClass('mdi-eye mdi-eye-off').addClass(visivel ? 'mdi-eye-off' : 'mdi-eye');
+                var titulo = visivel ? 'Ocultar' : (temSegredoSalvo ? 'Ver segredo salvo' : 'Mostrar o que foi digitado');
+                $btn.attr('title', titulo).attr('aria-label', titulo);
+                $aviso.toggleClass('d-none', !revelado);
+            }
+
+            $campo.on('input', function() {
+                if (veioDoServidor) {
+                    veioDoServidor = false;
+                    $aviso.addClass('d-none');
+                }
+            });
+
+            $btn.on('click', function() {
+                var visivel = $campo.attr('type') === 'text';
+
+                if (visivel) {
+                    if (veioDoServidor) {
+                        $campo.val('');
+                        veioDoServidor = false;
+                    }
+                    $campo.attr('type', 'password');
+                    pintarBotao(false, false);
+                    return;
+                }
+
+                if ($campo.val() !== '' || !temSegredoSalvo) {
+                    $campo.attr('type', 'text');
+                    pintarBotao(true, false);
+                    return;
+                }
+
+                $btn.prop('disabled', true);
+
+                $.ajax({
+                    type: 'POST',
+                    url: '<?php echo base_url('empresas/json_postrevelarpsp'); ?>',
+                    data: {
+                        id: <?php echo (int) $result->id; ?>,
+                        psp: psp
+                    },
+                    dataType: 'json',
+                    success: function(data) {
+                        if (handleRedirect(data)) return;
+                        if (!data || !data.success) {
+                            Swal.fire('Não foi possível exibir', (data && data.message) ? data.message : 'Falha ao ler o segredo.', 'error');
+                            return;
+                        }
+                        veioDoServidor = true;
+                        $campo.val(data.data.psp_client_secret).attr('type', 'text');
+                        pintarBotao(true, true);
+                    },
+                    error: function(xhr) {
+                        console.log(xhr.responseText);
+                        Swal.fire('Erro', 'Falha ao ler o segredo.', 'error');
+                    },
+                    complete: function() {
+                        $btn.prop('disabled', false);
+                    }
+                });
+            });
+        });
+
+        // Testa a credencial JÁ SALVA no servidor — nunca a digitada.
+        $('.btn-testar-psp').on('click', function() {
+            var $botao = $(this);
+            var psp = $botao.data('psp');
+            var $saida = $('.resultado-teste-psp[data-psp="' + psp + '"]');
+
+            $botao.prop('disabled', true);
+            $saida.html('<div class="alert alert-info mb-0"><div class="alert-message">Testando a conexão...</div></div>');
+
+            $.post('<?php echo base_url('empresas/json_posttestarpsp'); ?>', {
+                    id: <?php echo (int) $result->id; ?>,
+                    psp: psp
+                }, null, 'json')
+                .done(function(retorno) {
+                    var classe = retorno && retorno.success ? 'alert-success' : 'alert-danger';
+                    var texto = retorno && retorno.message ? retorno.message : 'Não foi possível interpretar a resposta.';
+                    $saida.html($('<div class="alert mb-0"><div class="alert-message"></div></div>')
+                        .addClass(classe).find('.alert-message').text(texto).end());
+                })
+                .fail(function() {
+                    $saida.html('<div class="alert alert-danger mb-0"><div class="alert-message">Falha de comunicação ao testar a conexão.</div></div>');
+                })
+                .always(function() {
+                    $botao.prop('disabled', false);
+                });
+        });
+
     });
 </script>

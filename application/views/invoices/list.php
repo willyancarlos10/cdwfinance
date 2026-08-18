@@ -106,6 +106,8 @@ $badgeSituacao = [
                   <th class="text-center">Vencimento</th>
                   <th class="text-end">Valor</th>
                   <th class="text-center">Situação</th>
+                  <th class="text-center">Registro</th>
+                  <th class="text-center">Boleto</th>
                   <th>Descrição</th>
                   <th class="text-center">Ações</th>
                 </tr>
@@ -139,6 +141,76 @@ $badgeSituacao = [
                         <?php echo isset($situations[$sit]) ? $situations[$sit] : $sit; ?>
                       </span>
                     </td>
+
+                    <?php
+                    // `registration` é DERIVADO na crm_invoices_v (migration
+                    // 035): o mesmo limiar serve ao badge, à fila e a um filtro
+                    // futuro. Recalcular aqui abriria espaço para a tela dizer
+                    // "registrada" enquanto a fila ainda a procura.
+                    $registro = (string) $fatura->registration;
+                    $pronta = ($registro === 'registrada');
+                    $aberta = ((string) $fatura->status === 'aberta');
+
+                    $badgeRegistro = [
+                      'sem_psp' => 'bg-light text-dark border',
+                      'nao_registrada' => 'bg-secondary',
+                      // "registrando" é estado NORMAL da emissão assíncrona,
+                      // não falha — daí azul, e não amarelo de alerta.
+                      'registrando' => 'bg-info text-dark',
+                      'registrada' => 'bg-success',
+                    ];
+                    ?>
+                    <td class="text-center text-nowrap">
+                      <span class="badge <?php echo isset($badgeRegistro[$registro]) ? $badgeRegistro[$registro] : 'bg-secondary'; ?>">
+                        <?php echo isset($registration_labels[$registro]) ? $registration_labels[$registro] : $registro; ?>
+                      </span>
+                      <?php if (trim((string) $fatura->psp) !== '') { ?>
+                        <br /><small class="text-muted"><?php echo htmlspecialchars(isset($psp_rotulos[(string) $fatura->psp]) ? $psp_rotulos[(string) $fatura->psp] : (string) $fatura->psp, ENT_QUOTES, 'UTF-8'); ?></small>
+                      <?php } ?>
+                      <?php
+                      // A ação só aparece onde há o que resolver. Cobrança
+                      // REGISTRADA não oferece troca: o boleto está de pé e o
+                      // cliente pode já tê-lo recebido — trocar ali significa
+                      // cancelar no banco e emitir outro, que é operação de
+                      // exceção e não merece um atalho a um clique no meio da
+                      // listagem. Quando for preciso mesmo, o caminho é
+                      // cancelar a fatura e gerar de novo.
+                      //
+                      // `registrando` mostra só ATUALIZAR: a cobrança existe,
+                      // falta o boleto (emissão assíncrona) — trocar de
+                      // provedor aqui cancelaria uma cobrança boa por
+                      // impaciência.
+                      $acaoRegistro = '';
+                      if ($aberta && !empty($psp_disponiveis)) {
+                        if ($registro === 'nao_registrada' || $registro === 'sem_psp') {
+                          $acaoRegistro = 'registrar / trocar';
+                        } elseif ($registro === 'registrando') {
+                          $acaoRegistro = 'atualizar';
+                        }
+                      }
+                      ?>
+                      <?php if ($acaoRegistro !== '') { ?>
+                        <br />
+                        <button type="button" class="btn btn-sm btn-link p-0 btn-trocar-psp"
+                          data-id="<?php echo (int) $fatura->id; ?>"
+                          data-psp="<?php echo htmlspecialchars((string) $fatura->psp, ENT_QUOTES, 'UTF-8'); ?>"
+                          data-cobranca="<?php echo trim((string) $fatura->psp_charge_id) !== '' ? '1' : '0'; ?>">
+                          <?php echo $acaoRegistro; ?>
+                        </button>
+                      <?php } ?>
+                    </td>
+                    <td class="text-center text-nowrap">
+                      <?php // O PDF só existe depois de a cobrança estar registrada. Em
+                            // "registrando" o banco ainda não gerou o arquivo, e o botão
+                            // levaria a um erro que o próprio estado já explica. ?>
+                      <?php if ($pronta) { ?>
+                        <button type="button" class="btn btn-sm btn-outline-danger btn-boleto" data-id="<?php echo (int) $fatura->id; ?>" title="Abrir o boleto">
+                          <i class="mdi mdi-file-pdf-box"></i>
+                        </button>
+                      <?php } else { ?>
+                        <span class="text-muted">—</span>
+                      <?php } ?>
+                    </td>
                     <td>
                       <small><?php echo htmlspecialchars((string) $fatura->description, ENT_QUOTES, 'UTF-8'); ?></small>
                       <?php if ((int) $fatura->id_charge > 0) { ?>
@@ -146,13 +218,43 @@ $badgeSituacao = [
                       <?php } ?>
                     </td>
                     <td class="text-center text-nowrap">
+                      <?php // Só fatura aberta e já com provedor tem o que resolver no banco. ?>
+                      <?php if ($registro === 'nao_registrada' || $registro === 'registrando') { ?>
+                        <?php if ($aberta) { ?>
+                          <button type="button" class="btn btn-sm btn-outline-primary btn-cobranca" data-id="<?php echo (int) $fatura->id; ?>" title="<?php echo $registro === 'registrando' ? 'Buscar o boleto no banco' : 'Registrar a cobrança no banco'; ?>">
+                            <i class="mdi mdi-cash-sync"></i>
+                          </button>
+                        <?php } ?>
+                      <?php } ?>
+                      <?php // ESCONDIDOS, não removidos:
+                            //
+                            // - o atalho para o contrato: a coluna Cliente já
+                            //   leva ao cadastro, e daqui a navegação de fato
+                            //   usada é a inversa (do contrato para as faturas,
+                            //   pela aba);
+                            // - a BAIXA MANUAL: o pagamento passa a ser
+                            //   reconhecido sozinho pelo webhook (etapa C) e
+                            //   pela conciliação (etapa D). Um botão "marcar
+                            //   como paga" ao lado disso convida a criar uma
+                            //   segunda verdade sobre o mesmo pagamento — o
+                            //   sistema diria "paga" sem que dinheiro nenhum
+                            //   tenha entrado.
+                            //
+                            // O DESFAZER continua visível: enquanto a baixa for
+                            // automática, é o único caminho para corrigir uma
+                            // conciliação errada.
+                      ?>
+                      <?php /*
                       <a class="btn btn-sm btn-outline-secondary" href="<?php echo base_url('contratos/info?id=' . (int) $fatura->id_contract); ?>" title="Abrir o contrato">
                         <i class="mdi mdi-file-document-outline"></i>
                       </a>
+                      */ ?>
                       <?php if ((string) $fatura->status === 'aberta') { ?>
+                        <?php /*
                         <button type="button" class="btn btn-sm btn-outline-success btn-status" data-id="<?php echo (int) $fatura->id; ?>" data-acao="pagar" title="Marcar como paga">
                           <i class="mdi mdi-check"></i>
                         </button>
+                        */ ?>
                         <button type="button" class="btn btn-sm btn-outline-danger btn-status" data-id="<?php echo (int) $fatura->id; ?>" data-acao="cancelar" title="Cancelar">
                           <i class="mdi mdi-close"></i>
                         </button>
@@ -227,6 +329,80 @@ $badgeSituacao = [
   <input type="hidden" name="acao" id="status_fatura_acao">
 </form>
 
+<?php // Modal do provedor. Só é renderizado quando há provedor ativo — sem
+      // credencial cadastrada não há troca possível, e um modal com select
+      // vazio só produziria um erro no clique. ?>
+<?php if (!empty($psp_disponiveis)) { ?>
+<div class="modal fade" id="modal_trocar_psp" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Provedor da cobrança</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label" for="trocar_psp_select">Registrar esta fatura em</label>
+          <select class="form-select" id="trocar_psp_select">
+            <?php foreach ($psp_disponiveis as $pspSlug => $pspNome) { ?>
+              <option value="<?php echo htmlspecialchars($pspSlug, ENT_QUOTES, 'UTF-8'); ?>"><?php echo htmlspecialchars($pspNome, ENT_QUOTES, 'UTF-8'); ?></option>
+            <?php } ?>
+          </select>
+          <small class="text-muted">
+            Manter o mesmo provedor e confirmar <strong>força o registro</strong> — útil quando a emissão falhou.
+          </small>
+        </div>
+        <?php // O aviso aparece só quando há cobrança viva: é o único caso em
+              // que confirmar dispara um cancelamento no banco anterior. ?>
+        <div class="alert alert-warning d-none" id="trocar_psp_aviso" role="alert">
+          <div class="alert-message">
+            Esta fatura <strong>já tem cobrança registrada</strong>. Ao trocar de provedor, ela é
+            <strong>cancelada no provedor atual</strong> antes de a nova ser emitida — se o cancelamento
+            falhar, a troca é abortada, para não deixar dois boletos da mesma fatura em aberto.
+          </div>
+        </div>
+        <p class="text-muted mb-0">
+          O contrato não muda: a alteração vale só para esta fatura.
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">VOLTAR</button>
+        <button type="button" class="btn btn-primary" id="btn_confirmar_troca_psp">CONFIRMAR</button>
+      </div>
+    </div>
+  </div>
+</div>
+<?php } ?>
+
+<?php // Visualizador do boleto. O iframe aponta para o endpoint de streaming,
+      // que serve do banco — e NÃO para uma data: URL com o base64 embutido:
+      // navegadores bloqueiam navegação para data: em PDF, e o HTML da página
+      // carregaria ~120 KB por boleto aberto. ?>
+<div class="modal fade" id="modal_boleto" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Boleto <span class="text-muted" id="boleto_titulo_fatura"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+      </div>
+      <div class="modal-body p-0">
+        <?php // Altura fixa: sem ela o iframe nasce com 150px e o boleto fica
+              // ilegível dentro de um modal grande e vazio. ?>
+        <iframe id="boleto_visualizador" src="" title="Boleto" style="width: 100%; height: 75vh; border: 0;"></iframe>
+      </div>
+      <div class="modal-footer">
+        <a href="#" class="btn btn-outline-secondary" id="btn_boleto_nova_aba" target="_blank" rel="noopener">
+          <i class="mdi mdi-open-in-new"></i> ABRIR EM NOVA ABA
+        </a>
+        <a href="#" class="btn btn-primary" id="btn_boleto_baixar">
+          <i class="mdi mdi-download"></i> BAIXAR
+        </a>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">FECHAR</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
   document.addEventListener('DOMContentLoaded', function() {
     var textos = {
@@ -237,7 +413,10 @@ $badgeSituacao = [
       },
       cancelar: {
         titulo: 'Cancelar a fatura?',
-        html: 'Ela deixa de contar como valor a receber, mas permanece no histórico do contrato.',
+        html: 'O <strong>boleto é cancelado no banco</strong> primeiro — se isso falhar, a fatura' +
+          ' continua em aberto, para não deixar uma cobrança de pé sem fatura.<br><br>' +
+          'Cancelada, ela deixa de contar como valor a receber e <strong>não pode ser reaberta</strong>:' +
+          ' permanece no histórico do contrato, e a competência dela não é gerada de novo.',
         botao: 'Cancelar fatura'
       },
       reabrir: {
@@ -262,10 +441,177 @@ $badgeSituacao = [
         confirmButtonText: texto.botao
       }).then(function(result) {
         if (!result.value) return;
+
+        // Só o CANCELAR vai ao banco (cancela a cobrança antes de fechar a
+        // fatura) e pode levar segundos. As outras transições são locais e
+        // instantâneas — um modal piscando ali seria ruído.
+        //
+        // Não há hide: a página redireciona, e o modal morre com ela.
+        if (acao === 'cancelar') {
+          $('#modal_loading').modal('show');
+        }
+
         $('#status_fatura_id').val(id);
         $('#status_fatura_acao').val(acao);
         $('#form_status_fatura').submit();
       });
     });
   });
+    // --- Cobrança no PSP -------------------------------------------
+    // Um botão só: registrar e consultar são a mesma pergunta para quem clica
+    // ("resolve essa cobrança"), e qual das duas roda é decidido pelo estado
+    // da fatura no servidor, nunca pela tela.
+    $('.btn-cobranca').on('click', function() {
+      var $botao = $(this);
+      var id = $botao.data('id');
+
+      $botao.prop('disabled', true).find('i').removeClass('mdi-cash-sync').addClass('mdi-loading mdi-spin');
+
+      $.post('<?php echo base_url('faturas/json_postcobranca'); ?>', {
+          id: id
+        }, null, 'json')
+        .done(function(retorno) {
+          if (typeof handleRedirect === 'function' && handleRedirect(retorno)) return;
+
+          if (retorno && retorno.success) {
+            // Recarrega só quando há o que mostrar: a emissão é assíncrona, e
+            // recarregar para o mesmo "processando" faria o usuário achar que
+            // o botão não fez nada.
+            if (retorno.data && retorno.data.pronta === false) {
+              Swal.fire('Ainda processando', retorno.message, 'info');
+              return;
+            }
+            // O aviso NÃO sai daqui: a linha seguinte recarrega a tela para o
+            // boleto e o PIX aparecerem, e um toast não sobrevive ao reload.
+            // Quem avisa é o flashdata gravado no servidor.
+            window.location.reload();
+            return;
+          }
+
+          Swal.fire('Não foi possível', (retorno && retorno.message) ? retorno.message : 'Falha ao falar com o provedor.', 'error');
+        })
+        .fail(function(xhr) {
+          console.log(xhr.responseText);
+          Swal.fire('Erro', 'Falha de comunicação ao registrar a cobrança.', 'error');
+        })
+        .always(function() {
+          $botao.prop('disabled', false).find('i').removeClass('mdi-loading mdi-spin').addClass('mdi-cash-sync');
+        });
+    });
+
+
+    // --- Troca de provedor / forçar registro -----------------------
+    // Registrar e trocar são a MESMA confirmação: quem decide o que fazer é a
+    // regra no servidor, pelo estado da fatura. Duas ações na tela para o
+    // mesmo botão obrigariam o usuário a saber em que estado a fatura está.
+    (function() {
+      var $modal = $('#modal_trocar_psp');
+      if (!$modal.length) return;
+
+      var faturaAlvo = 0;
+
+      $('.btn-trocar-psp').on('click', function() {
+        var $b = $(this);
+        faturaAlvo = $b.data('id');
+
+        var pspAtual = String($b.data('psp') || '');
+        if (pspAtual !== '') $('#trocar_psp_select').val(pspAtual);
+
+        // O aviso do cancelamento só vale quando existe cobrança viva.
+        $('#trocar_psp_aviso').toggleClass('d-none', String($b.data('cobranca')) !== '1');
+
+        bootstrap.Modal.getOrCreateInstance($modal[0]).show();
+      });
+
+      $('#btn_confirmar_troca_psp').on('click', function() {
+        var $botao = $(this);
+        var psp = $('#trocar_psp_select').val();
+        if (!faturaAlvo || !psp) return;
+
+        $botao.prop('disabled', true).text('PROCESSANDO...');
+
+        $.post('<?php echo base_url('faturas/json_posttrocarpsp'); ?>', {
+            id: faturaAlvo,
+            psp: psp
+          }, null, 'json')
+          .done(function(retorno) {
+            if (typeof handleRedirect === 'function' && handleRedirect(retorno)) return;
+
+            if (retorno && retorno.success) {
+              // Pronta: recarrega e o flashdata do servidor avisa. Ainda não
+              // pronta é o estado normal da emissão assíncrona — aí o modal
+              // fica aberto com a explicação, para o usuário não achar que
+              // precisa repetir.
+              if (retorno.data && retorno.data.pronta) {
+                window.location.reload();
+                return;
+              }
+              Swal.fire('Registrado', retorno.message, 'info');
+              bootstrap.Modal.getOrCreateInstance($modal[0]).hide();
+              return;
+            }
+
+            Swal.fire('Não foi possível', (retorno && retorno.message) ? retorno.message : 'Falha ao falar com o provedor.', 'error');
+          })
+          .fail(function(xhr) {
+            console.log(xhr.responseText);
+            Swal.fire('Erro', 'Falha de comunicação ao trocar o provedor.', 'error');
+          })
+          .always(function() {
+            $botao.prop('disabled', false).text('CONFIRMAR');
+          });
+      });
+    })();
+
+    // --- Boleto (PDF) ------------------------------------------------
+    // Delegado no document porque nas abas a tabela é redesenhada a cada
+    // página: um bind direto morreria no primeiro ANTERIOR/PRÓXIMA.
+    $(document).on('click', '.btn-boleto', function() {
+      var $botao = $(this);
+      var id = $botao.data('id');
+      var $icone = $botao.find('i');
+      var classeOriginal = $icone.attr('class');
+
+      $botao.prop('disabled', true);
+      $icone.attr('class', 'mdi mdi-loading mdi-spin');
+
+      // Garante o arquivo ANTES de abrir o modal. Se a busca falhasse dentro
+      // do iframe, o usuário veria a página de erro do navegador no lugar do
+      // boleto, sem explicação — aqui a falha vira mensagem.
+      $.post('<?php echo base_url('faturas/json_postboleto'); ?>', {
+          id: id
+        }, null, 'json')
+        .done(function(retorno) {
+          if (typeof sessaoExpirou === 'function' && sessaoExpirou(retorno)) return;
+          if (typeof handleRedirect === 'function' && handleRedirect(retorno)) return;
+
+          if (!retorno || !retorno.success) {
+            Swal.fire('Boleto indisponível', (retorno && retorno.message) ? retorno.message : 'Não foi possível obter o boleto.', 'error');
+            return;
+          }
+
+          var base = '<?php echo base_url('faturas/boleto/'); ?>' + encodeURIComponent(id);
+
+          $('#boleto_titulo_fatura').text('#' + id);
+          $('#boleto_visualizador').attr('src', base);
+          $('#btn_boleto_nova_aba').attr('href', base);
+          $('#btn_boleto_baixar').attr('href', base + '/download');
+
+          bootstrap.Modal.getOrCreateInstance(document.getElementById('modal_boleto')).show();
+        })
+        .fail(function(xhr) {
+          console.log(xhr.responseText);
+          Swal.fire('Erro', 'Falha de comunicação ao buscar o boleto.', 'error');
+        })
+        .always(function() {
+          $botao.prop('disabled', false);
+          $icone.attr('class', classeOriginal);
+        });
+    });
+
+    // Zera o iframe ao fechar: sem isso o PDF anterior continua carregado em
+    // memória e aparece por um instante na próxima abertura, antes do novo.
+    $('#modal_boleto').on('hidden.bs.modal', function() {
+      $('#boleto_visualizador').attr('src', '');
+    });
 </script>

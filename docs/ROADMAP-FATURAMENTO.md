@@ -1,22 +1,73 @@
 # Faturamento — próximas etapas
 
-Situação em 17/08/2026, depois da **fundação** (migration 024) e do **vínculo de serviço do ERP**
-(migration 025).
+Situação em **18/08/2026**, depois da **etapa A** — a cobrança no PSP (migrations **034**, **035** e
+**036**).
 
 ## O que já está pronto
 
-O CDW Finance gera as próprias faturas, reajusta contratos por índice e avisa o cliente do reajuste
-por e-mail. Tudo **local**: a geração de fatura não faz nenhuma chamada externa.
+O CDW Finance gera as próprias faturas, **registra a cobrança no banco (boleto + PIX)**, guarda o PDF
+do boleto, reajusta contratos por índice e avisa o cliente do reajuste por e-mail.
 
 `crm_contracts.billing_source` decide quem cobra cada contrato (`bomcontrole` | `cdwfinance`), e o
 default é `bomcontrole` — a base inteira continua sendo cobrada pelo ERP até alguém virar contrato a
-contrato.
+contrato. Quando é `cdwfinance`, **`crm_contracts.psp` diz por qual banco**, e a fatura carrega o
+snapshot desse provedor.
 
+**O que ainda NÃO acontece sozinho**: o cliente não recebe o boleto (etapa B), o pagamento não é
+reconhecido (etapas C e D) e a nota não é emitida (E–F). Hoje o boleto se entrega abrindo a fatura na
+tela, e a baixa **não tem caminho manual** — ela foi escondida de propósito, à espera de C e D.
+
+---
+
+## Resumo — todos os passos e o que já foi feito
+
+Situação em **18/08/2026** · `migration_version = 36` · legenda: ✅ pronto · 🟡 parcial · ⬜ não feito
+
+| # | Passo | O que entrega | Onde vive | |
+|---|---|---|---|---|
+| **1** | Cliente espelhado no ERP | Cadastro daqui vira cliente no Bom Controle, adotando o que já existir lá | migration 023 · `Bomcontrole_model::sincronizarCliente()` | ✅ |
+| **2** | Contrato + serviço do ERP | Contrato local, com o serviço do ERP vinculado (o que a NF exige) | migrations 009 e 025 | ✅ |
+| **3** | Fatura recorrente | Motor retomável a partir de `next_competence`; UNIQUE impede cobrança dupla | migration 024 · `Invoice_model` · `cron_gerar_faturas` | ✅ |
+| **3a** | Parcelamento e cobrança avulsa | Competência dividida em N parcelas; venda pontual dentro do contrato | migration 031 · `Charge_model` | ✅ |
+| **3b** | Reajuste anual por índice | Acumulado composto de 12 meses, aviso prévio ao cliente | migration 024 · `Adjustment_model` · `cron_reajustar_contratos` | 🟡 sem índices lançados |
+| **3c** | Motivos de cancelamento | Catálogo global do porquê do encerramento | migration 032 | ✅ |
+| **3d** | Destinatários de aviso | Quem notificar sobre boleto, NF e reajuste, por contrato | migration 033 | 🟡 cadastro inerte |
+| **4** | **Cobrança no PSP** | **A fatura vira boleto + PIX de verdade** — detalhe abaixo | migrations 034–036 · `Psp_provider` · `Psp_inter` · `Psp_model` | ✅ |
+| **5** | Envio do boleto por e-mail | Cliente recebe o boleto **anexo** (não há URL a mandar) | — | ⬜ **etapa B** |
+| **6** | Webhook de liquidação | Pagamento reconhecido em segundos, dá baixa e enfileira a NF | — | ⬜ **etapa C** |
+| **6a** | Conciliação por pull | Recupera o que o webhook perdeu e o que ficou sem registrar | — | ⬜ **etapa D** |
+| **7** | Emissão da NF no ERP | `CriarVendaProdutoServico` → `Venda/Obter` → `EfeturarPagamento`, em fila | — | ⬜ **etapa E** |
+| **8** | Envio da NF ao cliente | PDF e XML da nota | — | ⬜ **etapa F** |
+| **9** | Encerrar o contrato no ERP | Automático ao virar para `cdwfinance` | hoje é confirmação manual na tela | 🟡 **etapa G** |
+| **10** | Migração dos 402 contratos | Operação, não código | filtro de acompanhamento pronto (migration 026) | 🟡 **etapa H** |
+
+### O passo 4 em detalhe — o que a etapa A entregou
+
+| Peça | O que faz | |
+|---|---|---|
+| Migration **034** | `crm_contracts.psp` · 10 colunas de cobrança em `crm_invoices` · `crm_psp_accounts` · `crm_psp_webhook_events` | ✅ |
+| Migration **035** | `crm_invoices_v.registration` — *"existe boleto para pagar?"*, derivada | ✅ |
+| Migration **036** | `crm_invoices_boletos` — o PDF guardado no banco | ✅ |
+| `Psp_provider` + `Psp_inter` | 10 operações; PSP novo é **uma library + uma linha** na allowlist | ✅ |
+| `Psp_model` | Orquestrador único, 25 métodos públicos | ✅ |
+| Credencial por tenant **e** por PSP | Aba **Cobrança (PSP)** em Empresas: OAuth + mTLS, valida o par cert/chave, TESTAR CONEXÃO | ✅ |
+| PSP **por contrato** | Select no bloco Faturamento, exigido para ativar o faturamento | ✅ |
+| Registro da cobrança | Regra única (`processarPendentes`) por **três vias**: cron, GERAR FATURA e botão da fatura | ✅ |
+| Boleto em PDF | Busca sob demanda, guarda no banco, modal XL com baixar | ✅ |
+| Troca de PSP por fatura | Cancela no provedor antigo antes; falha aborta | ✅ |
+| Cancelamento da fatura | Derruba a cobrança no banco primeiro; falha mantém a fatura aberta | ✅ |
+| Adoção de cobrança órfã | Depois de um envio ambíguo, **procura antes de criar** (casa pelo `seuNumero`) | 🟡 sem teste ponta a ponta |
+
+### O caminho crítico daqui
+
+**B → C+D**, nessa ordem. C e D **entram juntas**: o ambiente local não recebe webhook, então sem a
+conciliação a etapa C não tem como ser verificada aqui. E–F dependem de C (é ela que enfileira a NF);
+G e H não dependem de nenhuma delas.
 ---
 
 ## Placar do ROADMAP — o que está pronto e o que falta
 
-Situação verificada no código em **17/08/2026** (migration_version = 26).
+Situação verificada no código em **18/08/2026** (migration_version = **36**).
 
 Legenda: ✅ pronto · 🟡 parcial · ⬜ não implementado
 
@@ -26,12 +77,12 @@ Legenda: ✅ pronto · 🟡 parcial · ⬜ não implementado
 |---|---|---|---|---|
 | **1** | **Cadastro do cliente com integração BC** | Cliente é criado aqui e espelhado no ERP. Resolve o Id por `bomcontrole_customer_id` → busca por documento (**adota** o que existir) → só então cria. Documento repetido no ERP **recusa**, em vez de escolher o primeiro. | `Bomcontrole_model::sincronizarCliente()`, migration 023 (`bomcontrole_customer_id`, `bomcontrole_synced`, `state_registration`), botão **SINCRONIZAR CADASTRO** em `clientes/info` | ✅ |
 | **2** | **Contrato no cdwfinance** | Contrato local (ciclo, valor, tipos de serviço, espaço). Sem `VendaContrato` no ERP — **mas com** o serviço do ERP vinculado, que é o que a NF do passo 7 exige. | migration 009 (`crm_contracts`), migration 025 (`bomcontrole_service_id` + `_name`), `Bomcontrole_model::vincularServico()` (revalida o Id no `Servico/Obter`) | ✅ |
-| **3** | **Fatura recorrente** | Motor retomável: gera as competências pendentes uma a uma a partir de `next_competence`, teto de 12 por rodada. UNIQUE `(id_contract, competence)` impede cobrança dupla no banco, não em PHP. | migration 024 (`crm_invoices`), `Invoice_model` (`getBillableContracts`, `generateForContract`, `generateNow`), `Cron::cron_gerar_faturas`, tela `faturas`, botão **GERAR FATURA** | ✅ |
+| **3** | **Fatura recorrente** | Motor retomável: gera as competências pendentes uma a uma a partir de `next_competence`, teto de 12 por rodada — o **cron gera mês a mês** (antecedência de 10 dias), e o teto alto serve só para contrato atrasado se recuperar. O botão GERAR FATURA gera **uma** competência e recusa o futuro. UNIQUE `(id_contract, id_charge, competence, installment_number)` impede cobrança dupla no banco, não em PHP. | migration 024 (`crm_invoices`), `Invoice_model` (`getBillableContracts`, `generateForContract`, `generateNow`), `Cron::cron_gerar_faturas`, tela `faturas`, botão **GERAR FATURA** | ✅ |
 | **3b** | *(bônus)* **Reajuste anual por índice** | Acumulado composto sobre os 12 meses encerrados; janela incompleta **não** reajusta. Aviso ao cliente 30 dias antes, com marcadores editáveis. | migration 024 (`crm_adjustment_indexes`, `crm_contracts_adjustments`), `Adjustment_model`, `Cron::cron_reajustar_contratos`, tela `indices`, `views/emails/billing/adjustment.php` | ✅ |
-| **4** | **Integra invoice com o banco/PSP** | Registrar a cobrança (boleto + PIX) no PSP e guardar `psp_charge_id`, `link_boleto`, `link_pix`. | **nada** — zero ocorrências de `webhook`, `pix`, `asaas`, `iugu`, `cora`, `inter` no `application/` | ⬜ |
-| **5** | **Envia boleto ao cliente por e-mail** | Template + gatilho na geração da fatura. | **nada**. Só existe o e-mail de reajuste. Reusável: fila `cron_enviar_email`, `Adjustment_model::destinatario()` (cascata financeiro → qualquer contato → `crm_customers.email`) e o padrão de marcadores | ⬜ |
-| **6** | **Webhook de liquidação** | Endpoint público, valida assinatura, reconsulta a cobrança, dá baixa e **enfileira** a NF. | **nada**. Hoje a baixa é **manual**: `Faturas::post_status` com a ação `pagar` (allowlist de transições `aberta→paga`, `paga→aberta`, `aberta→cancelada`) | 🟡 baixa existe, mas manual |
-| **6.5** | **Conciliação por pull** *(acrescentado)* | Cron que varre as cobranças em aberto no PSP e concilia o que o webhook perdeu. | **nada** | ⬜ |
+| **4** | **Integra invoice com o banco/PSP** | Registrar a cobrança (boleto + PIX) no PSP e guardar `psp_charge_id`, `link_boleto`, `link_pix`. **O PSP é escolha do contrato** (`crm_contracts.psp`), com snapshot de roteamento na fatura. | migration 034, `Psp_provider` + `Psp_inter`, `Psp_model` (`registrarCobranca`, `sincronizarCobranca`, `processarPendentes`), aba **Cobrança (PSP)** em `empresas/info`, select no bloco Faturamento, fase 2 do `cron_gerar_faturas`, coluna **Cobrança** na tela de Faturas | ✅ Banco Inter, exercitado no sandbox |
+| **5** | **Envia boleto ao cliente por e-mail** | Template + gatilho depois do registro da cobrança. O boleto vai **anexo** — o Inter não publica URL. | **nada** ainda, mas as peças estão prontas: `Psp_model::obterBoleto()` devolve o PDF, `crm_invoices.sent_at` existe (034) e a fila `cron_enviar_email` é pré-existente | ⬜ |
+| **6** | **Webhook de liquidação** | Endpoint público, reconsulta a cobrança, dá baixa e **enfileira** a NF. | **nada**. A baixa manual **foi escondida** (o código segue comentado) porque o pagamento passa a ser automático — um "marcar como paga" ao lado disso criaria segunda verdade sobre o mesmo dinheiro. Prontos: `interpretarWebhook()`, `crm_psp_webhook_events`, `crm_psp_accounts.webhook_token` e as colunas `paid_*` | ⬜ |
+| **6.5** | **Conciliação por pull** *(acrescentado)* | Cron que varre as cobranças em aberto no PSP e concilia o que o webhook perdeu — e que também recupera fatura **sem cobrança registrada**. | **nada**. `Psp_model::processarPendentes()` já faz a metade do registro; falta a metade do pagamento | ⬜ |
 | **7** | **Emite NF pelo ERP** | `Venda/CriarVendaProdutoServico` → `Venda/Obter` (pegar o `IdFatura`) → `Fatura/EfeturarPagamento`. **Em fila**, nunca no webhook. | **nada**. A library `Bom_controle` não tem nenhum método de `Venda/*` nem de `Fatura/*` | ⬜ |
 | **8** | **Envia NF ao cliente** | `Fatura/Obter/{id}` devolve **PDF e XML**; os dois vão ao cliente. | **nada** | ⬜ |
 | **9** | **Encerrar o `VendaContrato` no ERP** *(acrescentado)* | Automatizar o encerramento na virada do contrato para `cdwfinance`. | **nada**. Hoje é **confirmação manual** na tela: o usuário declara que encerrou no painel do ERP | 🟡 tem trava manual |
@@ -59,6 +110,7 @@ Campos que já se preenchem na tela e ainda não movem nada — é exatamente o 
 | `invoice_policy = 'pos_compensacao'` | `crm_contracts` + snapshot em `crm_invoices` | Sem baixa automática de pagamento, não há gatilho |
 | `invoice_policy = 'com_boleto'` | idem | Ninguém emite NF ainda |
 | `crm_adjustment_indexes` | tela GESTÃO › Índices | Tabela **vazia**: sem os 12 meses da janela, nenhum contrato reajusta |
+| `crm_contracts.notification_config` | bloco Faturamento do contrato (migration 033) | **Ninguém lê ainda.** É o cadastro de quem avisar sobre boleto, NF e reajuste — vira insumo da etapa B, e é lá que a regra "contrato x cascata do cliente" precisa ser decidida |
 
 ### O que falta no código, em detalhe
 
@@ -198,14 +250,46 @@ proteções que não dependem delas.
 
 | # | Etapa | O que entrega | Depende de | Decisão pendente |
 |---|---|---|---|---|
-| **A** | **Integração com o PSP/banco** | A fatura vira cobrança real: boleto + PIX registrados no PSP. Migration nova com `psp_charge_id`, `psp_status`, `link_boleto`, `link_pix`. Library nova no padrão de `Bom_controle` (nunca lança exceção, retorno padronizado). | Etapa 3 (**pronta**) | **Qual PSP** |
-| **B** | **Envio do boleto por e-mail** | O cliente recebe o boleto/PIX. Reusa a cascata de destinatário e o modelo de texto editável do `Adjustment_model`. | A | Texto do e-mail |
-| **C** | **Webhook de liquidação** | Endpoint público que recebe o aviso de pagamento, dá baixa na `crm_invoices` e **enfileira** a emissão da NF. | A | — |
-| **D** | **Conciliação por pull** | `cron_conciliar_cobrancas`: varre as faturas em aberto no PSP e concilia o que o webhook não trouxe. Webhook se perde; sem isso, fatura paga fica marcada como vencida. | A | Cadência (sugerido: 1×/dia) |
+| ~~**A**~~ | ~~**Integração com o PSP/banco**~~ | **PRONTA** (18/08/2026). Migration **034**; `Psp_provider` abstrata + `Psp_inter`; `Psp_model` como orquestrador único; PSP **selecionável por contrato**, com allowlist em `Psp_model::providers()` — PSP novo é uma library + uma linha. Ver [PLANO-PSP-COBRANCA.md](PLANO-PSP-COBRANCA.md). | Etapa 3 (**pronta**) | **Resolvida: Banco Inter** |
+| **B** | **Envio do boleto por e-mail** | `cron_enviar_faturas` manda o boleto **anexo** (não há URL a mandar) e carimba `sent_at`. Só envia fatura com `registration = 'registrada'` — antes disso não existe boleto. | A (**pronta**) | **Quem notificar** e texto do e-mail |
+| **C** | **Webhook de liquidação** | `Webhook.php` público, sem sessão, em `webhook/psp/<slug>/<token>`. Reconsulta a cobrança, grava `paid_at`/`paid_amount`/`paid_method`, vira o status para `paga` e **enfileira** a NF. | A (**pronta**) | — |
+| **D** | **Conciliação por pull** | `cron_conciliar_cobrancas`: varre o PSP e concilia o que o webhook não trouxe. **Deve entrar junto com C**, não depois — o ambiente local não recebe webhook, então sem ela a etapa C não tem como ser verificada aqui. | A (**pronta**) | Cadência (sugerido: 1×/dia) |
 | **E** | **Emissão da NF no ERP (com fila)** | `cron_emitir_notas` consome a fila: `Venda/CriarVendaProdutoServico` → `Venda/Obter` → `Fatura/EfeturarPagamento`. Migration com `bomcontrole_sale_id`, `bomcontrole_invoice_id`, `nf_status`, `nf_attempts`, `nf_last_error`, `nf_issued_at`. | C (o gatilho) + 2a (**pronta**) + `bomcontrole_customer_id` (**pronta**) | **`IdEmpresa`** e **gatilho por política** |
 | **F** | **Envio da NF por e-mail** | `Fatura/Obter/{id}` devolve **PDF e XML** da nota — os dois vão ao cliente. Campos `link_nota_fiscal` e `link_nota_fiscal_xml`. | E | — |
 | **G** | **Encerrar o contrato no ERP ao migrar** | `VendaContrato/Encerrar` automático quando o contrato passa a `billing_source = 'cdwfinance'`. Remove a confirmação manual da tela. | — (camada de escrita já existe) | — |
 | **H** | **Migração dos contratos** | Operação, não código: virar os contratos do ERP para cá, um a um. O filtro *"contrato sem vínculo com o Bom Controle"* da listagem de clientes (migration 026) é o painel de acompanhamento. | A–G | Ritmo da virada |
+
+### O que a etapa A deixou pronto para B, C e D
+
+Nada abaixo precisa ser criado — foi tudo entregue na etapa A e está à espera de quem consuma:
+
+| Peça | Onde | Serve a |
+|---|---|---|
+| `Psp_model::obterBoleto()` | devolve o PDF em base64, do banco ou buscando | **B** (anexo do e-mail) |
+| `crm_invoices.sent_at` | migration 034 | **B** (não reenviar) |
+| `crm_invoices_v.registration` | migration 035 | **B** (só envia `registrada`) |
+| `Psp_provider::interpretarWebhook()` | devolve **só** `charge_id` e tipo do evento | **C** |
+| `crm_psp_webhook_events` | migration 034 | **C** (auditoria do recebido) |
+| `crm_psp_accounts.webhook_token` | migration 034, UNIQUE global | **C** (resolve tenant+PSP pela URL) |
+| `paid_at`, `paid_amount`, `paid_method` | migration 034 | **C** e **D** |
+| `Psp_inter::registrarWebhook()` | `PUT /cobranca/v3/cobrancas/webhook` | **C** |
+| `Psp_inter::listarCobrancas()` | envelope com `ultimaPagina` como critério de parada | **D** |
+| `Psp_model::processarPendentes()` | regra única, já com escopo e orçamento | **D** (a metade do registro) |
+
+**A regra de segurança que C precisa herdar**: `interpretarWebhook()` devolve só o `charge_id`
+justamente para forçar a reconsulta — **nunca acreditar no valor que vem no corpo**. A assinatura do
+webhook do Inter **não foi confirmada**, e a defesa real é essa reconsulta, não a URL secreta.
+
+**O que D recupera além do pagamento**: fatura aberta com `psp_charge_id` vazio é a fila de registro,
+e a mesma rodada deve tratá-la. Hoje isso só acontece no `cron_gerar_faturas`.
+
+### Pendências de verificação (o sandbox do Inter caiu no meio)
+
+| O quê | Situação |
+|---|---|
+| **Adoção de cobrança órfã** | Implementada e **não testada ponta a ponta**. É o conserto do HTTP 500: uma emissão que falha de forma ambígua marca `FALHA_ENVIO`, e a tentativa seguinte **procura antes de criar**, casando pelo `seuNumero`. O mecanismo está confirmado (o `seuNumero` volta na listagem em 19/19 itens); falta exercitar o caminho inteiro, que exige criar uma cobrança e simular o 500. |
+| **Assinatura do webhook** | Desconhecida. Confirmar ao registrar o webhook na etapa C. |
+| **Credencial de produção** | Só há sandbox. Boleto registrado costuma exigir homologação com o banco. |
 
 ### Por que a emissão é fila, e não chamada no webhook (etapa E)
 
@@ -268,9 +352,15 @@ Ou seja: a seleção precisa ser **humana**, uma vez, numa tela — não dá par
 
 | Assunto | Por que importa | Opções |
 |---|---|---|
-| **Qual PSP** | Define a library da etapa A e o formato do webhook da etapa C. O critério é webhook confiável + boleto **e** PIX na mesma cobrança + API de listagem para a conciliação (etapa D). | Asaas, Cora, Iugu, Banco Inter (API PJ). **Se a conta da CDW já é em algum desses, isso decide sozinho** — evita abrir relacionamento bancário novo.<br>O **Banco Inter** foi analisado em [PSP-BANCO-INTER-VIABILIDADE.md](PSP-BANCO-INTER-VIABILIDADE.md): atende os três critérios, mas cobra três consequências de desenho (credencial vira arquivo, emissão assíncrona, token com cache) que os outros três não cobram. |
+| **Quem notificar o cliente** (etapa B) | Há **duas respostas** para a mesma pergunta, e elas convivem sem regra desde a migration 033: `crm_contracts.notification_config` (por CONTRATO, ainda inerte) e a cascata `Adjustment_model::destinatario()` (por CLIENTE: contato `financeiro` → qualquer contato com e-mail → `crm_customers.email`). O envio do boleto é o momento em que isso precisa ser decidido. | Proposto: **o contrato vence quando tem ao menos um `destinatario`**; vazio cai na cascata — lista vazia significa "não configurado", não "não avisar". Num resolvedor único, usado pelo boleto **e** pelo aviso de reajuste, senão voltam a ser duas regras. Hoje `notification_config` está preenchido em **zero** contratos, então é a janela mais barata para unificar. |
+| **Fatura cancelada pode reabrir?** | Cancelar é terminal: não há transição `cancelada → aberta`, e a linha cancelada segue ocupando a UNIQUE — **a competência nunca mais é gerada** (verificado). Cancelar por engano custa aquele mês para sempre. | Permitir `cancelada → aberta` reusa tudo o que existe: a fatura volta com `psp_charge_id` vazio, cai sozinha na fila e o cron emite um boleto novo. Sem migration. É decisão de negócio, não técnica. |
+| **Expurgo dos boletos guardados** | O PDF vive no banco em base64 (+33%): ~92 KB por boleto, da ordem de **440 MB/ano** a 4.800 faturas. | Apagar o PDF de fatura paga há N meses. O arquivo é reconstituível pela API enquanto a cobrança existir lá, então o expurgo não perde informação — só o atalho. Decidir quando o volume incomodar, não antes. |
 | **Gatilho da emissão por política** | O `invoice_policy` já prevê três casos, e o ROADMAP descreve só um. `pos_compensacao` emite no webhook (etapa C); **`com_boleto` emite na geração da fatura** — gatilho diferente, mesma fila. `nao_emitir` não entra na fila. | Se `com_boleto` continua valendo para parte da base, a fila da etapa E tem **duas portas de entrada**. Se toda a base vira `pos_compensacao`, a etapa E fica com uma só. |
 | **`IdEmpresa` no ERP** | Obrigatório em `Venda/CriarVendaProdutoServico`. Resolvido por `GET Empresa/Pesquisar?pesquisa=<CNPJ ou nome fantasia>` (não há "listar todas"), que devolve `Id`, `Documento`, `Nome`, `Padrao`. | Config nova **por tenant**, ao lado da chave do Bom Controle em `empresas/info` — mesmo lugar e mesmo motivo do `bomcontrole_secret`. Buscar pelo CNPJ da própria `crm_companies` e gravar o `Id`; o campo `Padrao` serve de conferência. |
+
+**Resolvida** (18/08/2026): **qual PSP** — ficou o **Banco Inter**, exercitado contra o sandbox real.
+O desenho não amarra a decisão: o PSP é escolha do contrato e a allowlist de
+`Psp_model::providers()` aceita outro provedor com uma library e uma linha.
 
 **Resolvidas** (migration 025): o vínculo do serviço ficou no **contrato**, não no tipo de serviço.
 Isso derrubou as duas questões que estavam aqui — o escopo por tenant vem de graça (o contrato já
@@ -296,7 +386,9 @@ o valor da fatura**, mesmo nos 215 contratos que têm dois tipos de serviço.
 |---|---|
 | **Índices de reajuste** | A tabela está **vazia**. Sem os 12 meses da janela, nenhum contrato é reajustado — a rotina pula e registra os meses faltando. Lançar em Gestão › Índices de reajuste. IGP-M e IPCA têm série no SGS do Banco Central (189 e 433); o **ICTI** não, então é lançamento manual de qualquer forma. |
 | **Política de NF por contrato** | `attributes.billing.needs_invoice` está vazio nos 386 clientes (a importação do gestor-interno não trouxe o dado), então o padrão efetivo é `nao_emitir` e cada contrato precisa ser definido à mão. |
-| **Conta no PSP** | Abrir/habilitar a conta, o convênio de cobrança e as credenciais de produção **antes** da etapa A. Boleto registrado depende de homologação com o banco e não é imediato. |
+| **Credencial de PRODUÇÃO do Inter** | Só existe sandbox cadastrado. Gerar a integração de produção no internet banking (com os escopos `boleto-cobranca.read/write` e `webhook.read/write`), enviar o par .crt/.key na aba **Cobrança (PSP)** da empresa e virar o ambiente para `producao`. Boleto registrado costuma exigir homologação com o banco e não é imediato. |
+| **URL pública HTTPS para o webhook** | O Inter exige HTTPS com certificado válido, e o ambiente local (MAMP na 8081) não recebe. É pré-requisito da etapa C — e a razão de a etapa D entrar junto. |
+| **Validade do certificado** | O certificado do Inter expira, e expirado **para toda cobrança do tenant de uma vez**. A aba mostra a data e avisa a 30 dias; renovar é reenviar o par pela tela. |
 | **Parâmetros de faturamento** | Conferir em Parâmetros gerais › Faturamento: dias de antecedência da geração (10), dia de vencimento sugerido (10), antecedência do aviso de reajuste (30) e o texto do e-mail. |
 | **Crontab** | O reajuste roda **antes** da geração, para a fatura do dia sair com o valor novo:<br>`0 5 * * * php index.php cron cron_reajustar_contratos`<br>`30 5 * * * php index.php cron cron_gerar_faturas`<br>Com as etapas D e E, entram ainda a conciliação e a fila de emissão — **depois** da geração. |
 
@@ -309,7 +401,34 @@ cd /Applications/mampstack-7.4.33-0/apache2/htdocs/cdwfinance && /Applications/m
 
 As duas rotinas são **CLI-only** — o botão EXECUTAR do painel Gestão › Cron não funciona para elas,
 de propósito (uma rodada varre a base inteira e pelo navegador morreria no `max_execution_time`).
-Para um contrato só, o botão **GERAR FATURA** da tela do contrato faz o mesmo sem terminal.
+Para um contrato só, o botão **GERAR FATURA** da tela do contrato antecipa **uma** competência — a do
+mês corrente, ou a mais antiga em atraso. Ele **não** faz o mesmo que a rodada: recusa competência
+além do mês corrente, porque cada competência gerada virou um boleto registrado no banco do cliente.
+
+Desde a etapa A o `cron_gerar_faturas` tem **duas fases**: gera as competências e depois **registra
+as cobranças pendentes** no PSP, com espaçamento de 1,2 s (o rate limit do Inter estoura em ~6
+chamadas seguidas) e orçamento de tempo. A segunda fase é a mesma regra dos botões da tela —
+`Psp_model::processarPendentes()`, só com escopo e orçamento diferentes.
+
+**Crontab, com o que existe hoje:**
+
+```
+0 5 * * *  php index.php cron cron_reajustar_contratos
+30 5 * * * php index.php cron cron_gerar_faturas
+```
+
+O reajuste vem antes para a fatura do dia sair com o valor novo. Com as etapas B e D entram ainda o
+envio e a conciliação, **depois** da geração:
+
+```
+0 8 * * *  php index.php cron cron_enviar_faturas        # etapa B
+0 9 * * *  php index.php cron cron_conciliar_cobrancas   # etapa D
+```
+
+⚠️ As duas rotinas novas precisam da linha correspondente em **`crm_cron_logs`**, criada na migration
+que as introduzir — sem ela não aparecem no painel Gestão › Cron e o `isCronActive()` as trata como
+inexistentes. A 034 **não** registrou `cron_conciliar_cobrancas` de propósito: uma rotina cadastrada
+mas inexistente ofereceria um botão EXECUTAR que derruba a requisição.
 
 ## Referência dos endpoints do ERP usados no fluxo
 

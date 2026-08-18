@@ -19,8 +19,17 @@ class Server_model extends CI_Model
     /**
      * Teto de tempo, em segundos, do laço que suspende as contas de um
      * contrato. Ver suspendContractAccounts().
+     *
+     * Subiu de 60 para 240 quando a falha passou a ABORTAR a mudança de status
+     * do contrato (Contratos::suspensaoImpede()): antes, o que não coubesse no
+     * orçamento ficava para a próxima tentativa e o contrato mudava de estado
+     * assim mesmo; agora a operação só vale se completar, e a repetição refaz
+     * as contas já aplicadas — então um orçamento curto num contrato grande (há
+     * um com 65 contas) nunca convergiria. Quem chama já faz set_time_limit(0);
+     * o teto existe para a requisição HTTP não ficar presa indefinidamente numa
+     * cadeia de painéis lentos.
      */
-    const ORCAMENTO_SUSPENSAO_SEGUNDOS = 60;
+    const ORCAMENTO_SUSPENSAO_SEGUNDOS = 240;
 
     public function __construct()
     {

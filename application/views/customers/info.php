@@ -103,7 +103,12 @@ $gb = function ($valor) {
       <div class="card-body py-3">
         <ul class="nav nav-pills" role="tablist">
           <?php foreach ($abas as $i => $aba) { ?>
-            <li class="nav-item"><a class="nav-link <?php if ($i === 0) echo 'active'; ?>" data-bs-toggle="tab" href="#<?php echo $aba['id']; ?>" role="tab"><?php echo $aba['titulo']; ?></a></li>
+            <li class="nav-item"><a class="nav-link <?php if ($i === 0) echo 'active'; ?>" data-bs-toggle="tab" href="#<?php echo $aba['id']; ?>" role="tab"><?php echo $aba['titulo']; ?>
+              <?php // Só a aba Faturas tem contagem — as demais carregam conteúdo
+                    // que já está na página. Zero não vira badge: a ausência diz o
+                    // mesmo sem poluir todas as abas com um "0". ?>
+              <?php if ($aba['id'] === 'tab_faturas' && !empty($faturas_count)) { ?><span class="badge bg-secondary ms-1"><?php echo (int) $faturas_count; ?></span><?php } ?>
+            </a></li>
           <?php } ?>
         </ul>
         <div class="tab-content pt-3">
@@ -671,6 +676,75 @@ $gb = function ($valor) {
 </div>
 <!-- modal anexo -->
 
+<?php // Modal do provedor na aba Faturas. Renderizado só quando há provedor
+      // ativo — o mesmo desenho da tela de Faturas, e o mesmo endpoint. ?>
+<?php if (!empty($psp_disponiveis)) { ?>
+<div class="modal fade" id="modal_psp_aba" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Provedor da cobrança</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label" for="psp_aba_select">Registrar esta fatura em</label>
+          <select class="form-select" id="psp_aba_select">
+            <?php foreach ($psp_disponiveis as $pspSlug => $pspNome) { ?>
+              <option value="<?php echo htmlspecialchars($pspSlug, ENT_QUOTES, 'UTF-8'); ?>"><?php echo htmlspecialchars($pspNome, ENT_QUOTES, 'UTF-8'); ?></option>
+            <?php } ?>
+          </select>
+          <small class="text-muted">
+            Manter o mesmo provedor e confirmar <strong>força o registro</strong> — é o caminho quando a emissão falhou.
+          </small>
+        </div>
+        <div class="alert alert-warning d-none" id="psp_aba_aviso" role="alert">
+          <div class="alert-message">
+            Esta fatura <strong>já tem cobrança registrada</strong>. Ao trocar de provedor, ela é
+            <strong>cancelada no provedor atual</strong> antes de a nova ser emitida — se o cancelamento
+            falhar, a troca é abortada, para não deixar dois boletos da mesma fatura em aberto.
+          </div>
+        </div>
+        <p class="text-muted mb-0">O contrato não muda: a alteração vale só para esta fatura.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">VOLTAR</button>
+        <button type="button" class="btn btn-primary" id="btn_confirmar_psp_aba">CONFIRMAR</button>
+      </div>
+    </div>
+  </div>
+</div>
+<?php } ?>
+
+<?php // Visualizador do boleto. O iframe aponta para o endpoint de streaming,
+      // que serve do banco — e NÃO para uma data: URL com o base64 embutido:
+      // navegadores bloqueiam navegação para data: em PDF, e o HTML da página
+      // carregaria ~120 KB por boleto aberto. ?>
+<div class="modal fade" id="modal_boleto" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Boleto <span class="text-muted" id="boleto_titulo_fatura"></span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+      </div>
+      <div class="modal-body p-0">
+        <?php // Altura fixa: sem ela o iframe nasce com 150px e o boleto fica
+              // ilegível dentro de um modal grande e vazio. ?>
+        <iframe id="boleto_visualizador" src="" title="Boleto" style="width: 100%; height: 75vh; border: 0;"></iframe>
+      </div>
+      <div class="modal-footer">
+        <a href="#" class="btn btn-outline-secondary" id="btn_boleto_nova_aba" target="_blank" rel="noopener">
+          <i class="mdi mdi-open-in-new"></i> ABRIR EM NOVA ABA
+        </a>
+        <a href="#" class="btn btn-primary" id="btn_boleto_baixar">
+          <i class="mdi mdi-download"></i> BAIXAR
+        </a>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">FECHAR</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
   document.addEventListener("DOMContentLoaded", function() {
     function notificar(tipo, mensagem) {
@@ -1008,6 +1082,83 @@ $gb = function ($valor) {
       cancelada: 'bg-secondary'
     };
 
+    // Estado do REGISTRO da cobrança (crm_invoices_v.registration). Pergunta
+    // diferente da `situation`: uma pode estar "a vencer" e sem boleto nenhum,
+    // e é esse o caso que ninguém vê até o cliente reclamar.
+    var badgeRegistro = {
+      sem_psp: 'bg-light text-dark border',
+      nao_registrada: 'bg-secondary',
+      // "registrando" é estado NORMAL da emissão assíncrona, não falha — daí
+      // azul, e não amarelo de alerta.
+      registrando: 'bg-info text-dark',
+      registrada: 'bg-success'
+    };
+
+    // Há provedor ativo? Sem isso o botão abriria um modal com select vazio.
+    var pspTemOpcoes = <?php echo !empty($psp_disponiveis) ? 'true' : 'false'; ?>;
+
+    function registroRotulo(item, rotulos) {
+      var reg = String(item.registration || '');
+      var classe = badgeRegistro[reg] || 'bg-secondary';
+      var texto = (rotulos && rotulos[reg]) ? rotulos[reg] : reg;
+
+      var html = '<span class="badge ' + classe + '">' + esc(texto) + '</span>';
+
+      // A ação vive AQUI, junto do estado que ela resolve — e não numa coluna
+      // à parte: quem vê "não registrada" quer agir na mesma linha do olho.
+      //
+      // Só aparece onde há o que resolver. Cobrança REGISTRADA não oferece
+      // troca: o boleto está de pé e o cliente pode já tê-lo recebido, então
+      // trocar significa cancelar no banco e emitir outro — operação de
+      // exceção, que não merece um atalho a um clique. `registrando` mostra só
+      // ATUALIZAR, porque a cobrança existe e falta o boleto (emissão
+      // assíncrona): trocar de provedor ali cancelaria uma cobrança boa por
+      // impaciência.
+      var acao = '';
+      if (pspTemOpcoes && String(item.status || '') === 'aberta') {
+        if (reg === 'nao_registrada' || reg === 'sem_psp') acao = 'registrar / trocar';
+        else if (reg === 'registrando') acao = 'atualizar';
+      }
+
+      if (acao !== '') {
+        html += '<br /><button type="button" class="btn btn-sm btn-link p-0 btn-trocar-psp-aba"' +
+          ' data-id="' + esc(item.id) + '"' +
+          ' data-psp="' + esc(item.psp || '') + '"' +
+          ' data-cobranca="' + (reg === 'nao_registrada' || reg === 'sem_psp' ? '0' : '1') + '">' +
+          acao + '</button>';
+      }
+
+      return html;
+    }
+
+    // O PDF só existe depois de a cobrança estar registrada: em "registrando"
+    // o banco ainda não gerou o arquivo, e o botão levaria a um erro que o
+    // próprio estado já explica.
+    function boletoBotao(item) {
+      if (String(item.registration || '') !== 'registrada') {
+        return '<span class="text-muted">—</span>';
+      }
+
+      return '<button type="button" class="btn btn-sm btn-outline-danger btn-boleto"' +
+        ' data-id="' + esc(item.id) + '" title="Abrir o boleto">' +
+        '<i class="mdi mdi-file-pdf-box"></i></button>';
+    }
+
+    // Só CANCELAR: a baixa é automática (webhook + conciliação) e o atalho para
+    // o contrato não faz sentido aqui — nesta aba já se está nele, ou a um
+    // clique dele. O botão existe nas três telas para a ação não depender de
+    // por onde o usuário chegou na fatura.
+    function acoesFatura(item) {
+      if (String(item.status || '') !== 'aberta') {
+        return '<span class="text-muted">—</span>';
+      }
+
+      return '<button type="button" class="btn btn-sm btn-outline-danger btn-cancelar-fatura"' +
+        ' data-id="' + esc(item.id) + '" title="Cancelar a fatura">' +
+        '<i class="mdi mdi-close"></i></button>';
+    }
+    var registrosRotulos = {};
+
     function linhaFaturaCliente(item, rotulos) {
       var sit = String(item.situation || '');
       var badge = badgeSituacao[sit] || 'bg-secondary';
@@ -1024,7 +1175,10 @@ $gb = function ($valor) {
         '<td class="text-center">' + dataBr(item.due_date) + '</td>' +
         '<td class="text-end">' + moedaBr(item.value) + '</td>' +
         '<td class="text-center"><span class="badge ' + badge + '">' + esc(rotulo) + '</span></td>' +
+        '<td class="text-center">' + registroRotulo(item, registrosRotulos) + '</td>' +
+        '<td class="text-center">' + boletoBotao(item) + '</td>' +
         '<td><small>' + esc(item.description) + origemRotulo(item) + '</small></td>' +
+        '<td class="text-center">' + acoesFatura(item) + '</td>' +
         '</tr>';
     }
 
@@ -1044,6 +1198,7 @@ $gb = function ($valor) {
     function renderFaturasCliente(data) {
       var $saida = $('#faturas_cliente_conteudo');
       var rotulos = data.situations || {};
+      registrosRotulos = data.registrations || {};
 
       if (!data.total) {
         $saida.html('<div class="text-center text-muted py-5">' +
@@ -1061,7 +1216,10 @@ $gb = function ($valor) {
         '<th class="text-center">Vencimento</th>' +
         '<th class="text-end">Valor</th>' +
         '<th class="text-center">Situação</th>' +
+        '<th class="text-center">Registro</th>' +
+        '<th class="text-center">Boleto</th>' +
         '<th>Descrição</th>' +
+        '<th class="text-center">Ações</th>' +
         '</tr></thead><tbody>';
 
       $.each(data.itens || [], function(i, item) {
@@ -1187,6 +1345,179 @@ $gb = function ($valor) {
         }
       });
     });
+    // --- Provedor da cobrança, a partir da aba Faturas ---------------
+    // Delegado no document porque a tabela é redesenhada a cada página da aba:
+    // um bind direto morreria no primeiro ANTERIOR/PRÓXIMA.
+    (function() {
+      var $modalPsp = $('#modal_psp_aba');
+      if (!$modalPsp.length) return;
+
+      var faturaAlvo = 0;
+
+      $(document).on('click', '.btn-trocar-psp-aba', function() {
+        var $b = $(this);
+        faturaAlvo = $b.data('id');
+
+        var pspAtual = String($b.data('psp') || '');
+        if (pspAtual !== '') $('#psp_aba_select').val(pspAtual);
+
+        $('#psp_aba_aviso').toggleClass('d-none', String($b.data('cobranca')) !== '1');
+        bootstrap.Modal.getOrCreateInstance($modalPsp[0]).show();
+      });
+
+      $('#btn_confirmar_psp_aba').on('click', function() {
+        var $botao = $(this);
+        var psp = $('#psp_aba_select').val();
+        if (!faturaAlvo || !psp) return;
+
+        $botao.prop('disabled', true).text('PROCESSANDO...');
+
+        $.post('<?php echo base_url('faturas/json_posttrocarpsp'); ?>', {
+            id: faturaAlvo,
+            psp: psp
+          }, null, 'json')
+          .done(function(retorno) {
+            if (typeof sessaoExpirou === 'function' && sessaoExpirou(retorno)) return;
+
+            if (retorno && retorno.success) {
+              bootstrap.Modal.getOrCreateInstance($modalPsp[0]).hide();
+              // Recarrega só a aba, sem reload de página: o usuário está no
+              // meio da tela do contrato e perderia o contexto à toa.
+              if (typeof carregarFaturas === 'function') carregarFaturas(1);
+              else if (typeof carregarFaturasCliente === 'function') carregarFaturasCliente(1);
+              notificarPsp(retorno.data && retorno.data.pronta ? 'success' : 'info', retorno.message);
+              return;
+            }
+
+            Swal.fire('Não foi possível', (retorno && retorno.message) ? retorno.message : 'Falha ao falar com o provedor.', 'error');
+          })
+          .fail(function(xhr) {
+            console.log(xhr.responseText);
+            Swal.fire('Erro', 'Falha de comunicação ao registrar a cobrança.', 'error');
+          })
+          .always(function() {
+            $botao.prop('disabled', false).text('CONFIRMAR');
+          });
+      });
+
+      function notificarPsp(tipo, texto) {
+        if (typeof notificar === 'function') { notificar(tipo === 'success' ? 'success' : 'info', texto); return; }
+        Swal.fire(tipo === 'success' ? 'Pronto' : 'Registrado', texto, tipo === 'success' ? 'success' : 'info');
+      }
+    })();
+
+
+    // --- Boleto (PDF) ------------------------------------------------
+    // Delegado no document porque nas abas a tabela é redesenhada a cada
+    // página: um bind direto morreria no primeiro ANTERIOR/PRÓXIMA.
+    $(document).on('click', '.btn-boleto', function() {
+      var $botao = $(this);
+      var id = $botao.data('id');
+      var $icone = $botao.find('i');
+      var classeOriginal = $icone.attr('class');
+
+      $botao.prop('disabled', true);
+      $icone.attr('class', 'mdi mdi-loading mdi-spin');
+
+      // Garante o arquivo ANTES de abrir o modal. Se a busca falhasse dentro
+      // do iframe, o usuário veria a página de erro do navegador no lugar do
+      // boleto, sem explicação — aqui a falha vira mensagem.
+      $.post('<?php echo base_url('faturas/json_postboleto'); ?>', {
+          id: id
+        }, null, 'json')
+        .done(function(retorno) {
+          if (typeof sessaoExpirou === 'function' && sessaoExpirou(retorno)) return;
+          if (typeof handleRedirect === 'function' && handleRedirect(retorno)) return;
+
+          if (!retorno || !retorno.success) {
+            Swal.fire('Boleto indisponível', (retorno && retorno.message) ? retorno.message : 'Não foi possível obter o boleto.', 'error');
+            return;
+          }
+
+          var base = '<?php echo base_url('faturas/boleto/'); ?>' + encodeURIComponent(id);
+
+          $('#boleto_titulo_fatura').text('#' + id);
+          $('#boleto_visualizador').attr('src', base);
+          $('#btn_boleto_nova_aba').attr('href', base);
+          $('#btn_boleto_baixar').attr('href', base + '/download');
+
+          bootstrap.Modal.getOrCreateInstance(document.getElementById('modal_boleto')).show();
+        })
+        .fail(function(xhr) {
+          console.log(xhr.responseText);
+          Swal.fire('Erro', 'Falha de comunicação ao buscar o boleto.', 'error');
+        })
+        .always(function() {
+          $botao.prop('disabled', false);
+          $icone.attr('class', classeOriginal);
+        });
+    });
+
+    // Zera o iframe ao fechar: sem isso o PDF anterior continua carregado em
+    // memória e aparece por um instante na próxima abertura, antes do novo.
+    $('#modal_boleto').on('hidden.bs.modal', function() {
+      $('#boleto_visualizador').attr('src', '');
+    });
+
+
+    // --- Cancelar a fatura, a partir das abas ------------------------
+    // Endpoint AJAX próprio: o post_status da tela de Faturas redireciona para
+    // a listagem, e daqui isso tiraria o usuário do contrato no meio da
+    // conferência. A REGRA é a mesma nos dois caminhos (derrubarCobranca no
+    // servidor) — o que muda é só como a resposta volta.
+    $(document).on('click', '.btn-cancelar-fatura', function() {
+      var id = $(this).data('id');
+
+      Swal.fire({
+        title: 'Cancelar a fatura?',
+        html: 'O <strong>boleto é cancelado no banco</strong> primeiro — se isso falhar, a fatura' +
+          ' continua em aberto, para não deixar uma cobrança de pé sem fatura.<br><br>' +
+          'Cancelada, ela <strong>não pode ser reaberta</strong>, e a competência dela não é gerada de novo.',
+        icon: 'warning',
+        showCancelButton: true,
+        cancelButtonText: 'Voltar',
+        confirmButtonText: 'Cancelar fatura'
+      }).then(function(r) {
+        if (!r.value) return;
+
+        // O cancelamento vai ao banco antes de fechar a fatura e pode levar
+        // segundos. Aqui a tela NÃO recarrega — então o hide precisa cobrir
+        // todas as saídas, inclusive a de sucesso, senão o modal fica travando
+        // a tela com o trabalho já feito.
+        $('#modal_loading').modal('show');
+
+        $.post('<?php echo base_url('faturas/json_postcancelar'); ?>', {
+            id: id
+          }, null, 'json')
+          .done(function(retorno) {
+            // Esconde ANTES de qualquer diálogo: no `.always()` o hide roda
+            // depois do `.done()`, e o alerta de erro subiria com o loading
+            // ainda por baixo, piscando o backdrop.
+            $('#modal_loading').modal('hide');
+
+            if (typeof sessaoExpirou === 'function' && sessaoExpirou(retorno)) return;
+
+            if (!retorno || !retorno.success) {
+              Swal.fire('Não foi possível cancelar', (retorno && retorno.message) ? retorno.message : 'Falha ao cancelar a fatura.', 'error');
+              return;
+            }
+
+            // Recarrega só a aba: a fatura muda de situação e sai do total em
+            // aberto do rodapé.
+            if (typeof carregarFaturas === 'function') carregarFaturas(1);
+            else if (typeof carregarFaturasCliente === 'function') carregarFaturasCliente(1);
+
+            if (typeof notificar === 'function') notificar('success', retorno.message);
+            else Swal.fire('Pronto', retorno.message, 'success');
+          })
+          .fail(function(xhr) {
+            $('#modal_loading').modal('hide');
+            console.log(xhr.responseText);
+            Swal.fire('Erro', 'Falha de comunicação ao cancelar a fatura.', 'error');
+          });
+      });
+    });
+
   });
 </script>
 

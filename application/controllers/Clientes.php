@@ -667,6 +667,28 @@ class Clientes extends MY_Controller
       if ($d->contract_status === 'vigente') $vigentes[] = $d;
     }
     $this->data['contract_domains'] = $vigentes;
+
+    // Contagem para o badge da aba Faturas: a lista é lazy (só busca ao
+    // abrir a aba), então sem este número a tela não sabe dizer se há
+    // faturas antes de alguém clicar — que é o que o badge responde.
+    $this->load->model('invoice_model');
+    // Provedores ATIVOS, para a aba Faturas oferecer a troca de PSP. Sem
+    // credencial ativa não há troca possível, e o modal com select vazio só
+    // produziria erro no clique.
+    $this->load->model('psp_model');
+    $this->data['psp_disponiveis'] = [];
+    foreach ($this->psp_model->rotulos() as $pspSlug => $pspNome) {
+      if ($this->psp_model->isActive((int) $this->getCurrentCompanyId(), $pspSlug)) {
+        $this->data['psp_disponiveis'][$pspSlug] = $pspNome;
+      }
+    }
+
+    $this->data['faturas_count'] = (int) $this->invoice_model->contarPorEscopo(
+      'cliente',
+      $id,
+      (int) $this->getCurrentCompanyId()
+    );
+
     $this->data['domains_by_contract'] = $porContratoDominios;
     $this->data['usage_by_contract_mb'] = $usoPorContratoMb;
 
@@ -1117,6 +1139,12 @@ class Clientes extends MY_Controller
     }
 
     $pagina['situations'] = $this->invoice_model->situations();
+
+    // Rótulos do estado de REGISTRO (crm_invoices_v.registration): a aba
+    // precisa distinguir "sem boleto" de "boleto pronto", que é pergunta
+    // diferente da situação de pagamento.
+    $this->load->model('psp_model');
+    $pagina['registrations'] = $this->psp_model->registrationLabels();
 
     echo json_encode([
       'success' => TRUE,

@@ -73,6 +73,19 @@ class Faturas extends MY_Controller
     $this->data['total_results'] = $config['total_rows'];
     $this->data['est_count'] = $config['total_rows'];
     $this->data['situations'] = $this->situations();
+
+    // Catálogo do PSP para o badge de registro e para o modal de troca. Só os
+    // provedores com credencial ATIVA entram nas opções — oferecer um sem
+    // credencial produziria uma troca que falha na hora de registrar.
+    $this->load->model('psp_model');
+    $this->data['registration_labels'] = $this->psp_model->registrationLabels();
+    $this->data['psp_rotulos'] = $this->psp_model->rotulos();
+    $this->data['psp_disponiveis'] = [];
+    foreach ($this->psp_model->rotulos() as $pspSlug => $pspNome) {
+      if ($this->psp_model->isActive((int) $this->getCurrentCompanyId(), $pspSlug)) {
+        $this->data['psp_disponiveis'][$pspSlug] = $pspNome;
+      }
+    }
     $this->data['totais'] = $this->totaisDoFiltro($where);
 
     // A chave vai por variável, e não como `Faturas::FILTRO_AVANCADO` na view:
@@ -238,6 +251,372 @@ class Faturas extends MY_Controller
    * lá, marcar como paga aqui é o único caminho — e por isso a ação existe
    * desde já, mesmo simples.
    */
+  /**
+   * Registra ou atualiza a cobrança de uma fatura no PSP, sob demanda.
+   *
+   * É o mesmo caminho do cron, para uma fatura só — o botão existe porque
+   * esperar a próxima rodada para descobrir por que uma cobrança não saiu é
+   * caro quando o cliente está no telefone.
+   *
+   * As duas ações vivem no mesmo endpoint porque, do ponto de vista de quem
+   * clica, a pergunta é uma só: "resolve essa cobrança". Qual das duas rodar é
+   * decidido pelo estado da fatura, não pelo usuário.
+   */
+  /**
+   * Texto seguro para o flashdata.
+   *
+   * O header.php injeta a mensagem dentro de uma string JS entre aspas duplas
+   * SEM escapar — uma aspa vinda da resposta de um PSP quebraria o alerta
+   * justamente no caso em que ele importa. Mesmo desenho do
+   * Contratos::textoParaFlash().
+   *
+   * @param  string $texto
+   * @return string
+   */
+  private function textoParaFlash($texto)
+  {
+    $limpo = strip_tags((string) $texto);
+    $limpo = str_replace(['\\', '"'], ['/', "'"], $limpo);
+    $limpo = preg_replace('/\s+/u', ' ', $limpo);
+
+    return trim(mb_substr((string) $limpo, 0, 300));
+  }
+
+  public function json_postcobranca()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $id = (int) $this->input->post('id');
+    $idCompany = (int) $this->getCurrentCompanyId();
+
+    $fatura = $this->global_model->getWhere_off('crm_invoices', [
+      'id' => $id,
+      'id_company' => $idCompany,
+    ], TRUE);
+
+    if (empty($fatura)) {
+      echo json_encode([
+        'success' => FALSE,
+        'return' => FALSE,
+        'message' => 'Fatura não encontrada.',
+        'data' => NULL,
+        'errors' => ['fatura' => 'Fatura não encontrada.'],
+      ]);
+      return;
+    }
+
+    $this->load->model('psp_model');
+
+    // MESMA REGRA do cron e do GERAR FATURA, recortada nesta fatura. Registrar
+    // e consultar não são escolha de quem clica: a regra decide pelo estado da
+    // fatura, e a segunda fase já apanha o que a primeira acabou de registrar
+    // — por isso um clique só basta, mesmo com a emissão sendo assíncrona.
+    $processo = $this->psp_model->processarPendentes([
+      'id_user' => (int) $this->session->userdata('user')->id,
+      'id_company' => $idCompany,
+      'id_invoice' => $id,
+      'limite' => Psp_model::MAX_COBRANCAS_NA_TELA,
+      'orcamento' => Psp_model::ORCAMENTO_COBRANCAS_TELA_SEGUNDOS,
+    ]);
+
+    // Quem responde "deu certo?" é o ESTADO DA FATURA depois do processo, não
+    // o retorno intermediário: é ele que a tela vai mostrar, e é ele que
+    // sobrevive a uma falha parcial.
+    $atual = $this->global_model->getWhere_off('crm_invoices', [
+      'id' => $id,
+      'id_company' => $idCompany,
+    ], TRUE);
+
+    $pronta = !empty($atual)
+      && (trim((string) $atual->linha_digitavel) !== '' || trim((string) $atual->link_pix) !== '');
+
+    if ($pronta) {
+      $mensagem = 'Cobrança pronta — boleto e PIX disponíveis.';
+    } elseif ((int) $processo['falhas'] > 0) {
+      $mensagem = implode('; ', $processo['mensagens']);
+    } elseif (!empty($atual) && trim((string) $atual->psp_charge_id) !== '') {
+      // Registrada, sem boleto ainda: é o estado normal da emissão assíncrona,
+      // e não um erro — dizer "falhou" aqui mandaria o usuário tentar de novo
+      // sem necessidade.
+      $mensagem = 'Cobrança registrada no banco; o boleto ainda está sendo gerado. Tente atualizar em instantes.';
+    } else {
+      $mensagem = 'Não foi possível registrar a cobrança agora. A próxima rodada do cron tenta de novo.';
+    }
+
+    $sucesso = $pronta || ((int) $processo['falhas'] === 0);
+
+    // Com o que mostrar, a tela recarrega — e um toast disparado pelo JS
+    // morreria nesse reload. A mensagem vai por flashdata, o mesmo canal do
+    // resto do sistema. O escape é obrigatório: o header.php injeta o texto
+    // numa string JS entre aspas duplas SEM escapar, e a resposta de um PSP
+    // pode conter aspas.
+    if ($pronta) {
+      $this->session->set_flashdata('success', $this->textoParaFlash($mensagem));
+    }
+
+    echo json_encode([
+      'success' => $sucesso,
+      'return' => $sucesso,
+      'message' => $mensagem,
+      'data' => ['pronta' => $pronta],
+      'errors' => $sucesso ? [] : ['fatura' => $mensagem],
+    ]);
+  }
+  /**
+   * Troca o provedor desta fatura e força o registro da cobrança.
+   *
+   * Mandar o MESMO provedor é caminho válido e é o "forçar registrar": a regra
+   * do model decide o que fazer pelo estado da fatura, então não há duas ações
+   * a distinguir na tela.
+   */
+  public function json_posttrocarpsp()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $id = (int) $this->input->post('id');
+    $psp = trim((string) $this->input->post('psp'));
+    $idCompany = (int) $this->getCurrentCompanyId();
+
+    $this->load->model('psp_model');
+
+    $resultado = $this->psp_model->trocarPsp(
+      $id,
+      $idCompany,
+      $psp,
+      (int) $this->session->userdata('user')->id
+    );
+
+    // O estado da fatura DEPOIS do processo é quem responde "deu certo?" — é
+    // ele que a tela vai mostrar e o que sobrevive a uma falha parcial.
+    $atual = $this->global_model->getWhere_off('crm_invoices', [
+      'id' => $id,
+      'id_company' => $idCompany,
+    ], TRUE);
+
+    $pronta = !empty($atual)
+      && (trim((string) $atual->linha_digitavel) !== '' || trim((string) $atual->link_pix) !== '');
+
+    // Com o que mostrar, a tela recarrega — e um toast morreria nesse reload.
+    // textoParaFlash porque o header.php injeta o texto numa string JS entre
+    // aspas duplas SEM escapar, e aqui a mensagem carrega a resposta do banco.
+    if ($pronta) {
+      $this->session->set_flashdata('success', $this->textoParaFlash((string) $resultado['message']));
+    }
+
+    echo json_encode([
+      'success' => !empty($resultado['success']),
+      'return' => !empty($resultado['success']),
+      'message' => (string) $resultado['message'],
+      'data' => ['pronta' => $pronta],
+      'errors' => !empty($resultado['success']) ? [] : ['fatura' => (string) $resultado['message']],
+    ]);
+  }
+  /**
+   * Garante que o boleto desta fatura está disponível, buscando no provedor se
+   * ainda não estiver guardado.
+   *
+   * É chamado ANTES de abrir o modal, e não pelo próprio visualizador: se a
+   * busca falhasse dentro do iframe, o usuário veria uma página de erro do
+   * navegador no lugar do boleto, sem explicação nem caminho de volta. Aqui a
+   * falha vira mensagem.
+   */
+  public function json_postboleto()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $id = (int) $this->input->post('id');
+    $idCompany = (int) $this->getCurrentCompanyId();
+
+    $this->load->model('psp_model');
+    $resultado = $this->psp_model->obterBoleto($id, $idCompany, (int) $this->session->userdata('user')->id);
+
+    echo json_encode([
+      'success' => !empty($resultado['success']),
+      'return' => !empty($resultado['success']),
+      'message' => (string) $resultado['message'],
+      // O conteúdo NÃO volta no JSON: um PDF de 90 KB viraria ~120 KB de
+      // base64 dentro do HTML da página, para depois ser reconvertido em JS.
+      // O modal aponta para o endpoint de streaming, que serve do banco.
+      'data' => [
+        'bytes' => (int) ($resultado['data']['bytes'] ?? 0),
+        'do_cache' => !empty($resultado['data']['do_cache']),
+      ],
+      'errors' => !empty($resultado['success']) ? [] : ['boleto' => (string) $resultado['message']],
+    ]);
+  }
+
+  /**
+   * Entrega o PDF do boleto.
+   *
+   * Só o ID vem da requisição — o conteúdo sai da linha do banco, escopada
+   * pelo tenant. Nunca aceitar caminho ou nome de arquivo do POST/GET é a
+   * mesma regra da exclusão de anexos do cliente.
+   *
+   * @param int $id
+   * @param string $modo 'download' força salvar; qualquer outra coisa abre inline
+   */
+  public function boleto($id = 0, $modo = '')
+  {
+    $id = (int) $id;
+    $idCompany = (int) $this->getCurrentCompanyId();
+
+    $this->load->model('psp_model');
+    $resultado = $this->psp_model->obterBoleto($id, $idCompany, (int) $this->session->userdata('user')->id);
+
+    if (empty($resultado['success'])) {
+      // Texto puro, e não uma view: quem chega aqui é um iframe ou uma aba
+      // nova, e uma tela do painel dentro do visualizador de PDF só confundiria.
+      $this->output
+        ->set_status_header(404)
+        ->set_content_type('text/plain', 'utf-8')
+        ->set_output((string) $resultado['message']);
+      return;
+    }
+
+    $pdf = base64_decode((string) $resultado['data']['content'], TRUE);
+    if ($pdf === FALSE || $pdf === '') {
+      $this->output
+        ->set_status_header(500)
+        ->set_content_type('text/plain', 'utf-8')
+        ->set_output('O arquivo guardado do boleto está ilegível. Use "registrar / trocar" para reemitir a cobrança.');
+      return;
+    }
+
+    // Nome pensado para quem baixa: o id do PSP não diz nada depois de salvo
+    // na pasta de downloads.
+    $fatura = $this->global_model->getWhere_off('crm_invoices', [
+      'id' => $id,
+      'id_company' => $idCompany,
+    ], TRUE);
+
+    $nome = 'boleto-' . $id
+      . (!empty($fatura) ? '-' . date('m-Y', strtotime((string) $fatura->competence)) : '')
+      . '.pdf';
+
+    $disposicao = ($modo === 'download') ? 'attachment' : 'inline';
+
+    header('Content-Type: application/pdf');
+    header('Content-Disposition: ' . $disposicao . '; filename="' . $nome . '"');
+    header('Content-Length: ' . strlen($pdf));
+    // Boleto é documento com dado do cliente: não fica em cache de proxy.
+    header('Cache-Control: private, no-store');
+    header('Pragma: no-cache');
+
+    echo $pdf;
+  }
+  /**
+   * Derruba a cobrança de uma fatura no banco — o passo obrigatório antes de
+   * cancelá-la.
+   *
+   * Extraído porque DUAS vias cancelam: a tela de Faturas (POST + redirect) e
+   * as abas do contrato e do cliente (AJAX, que não pode redirecionar para
+   * outra tela no meio da conferência). Regra duplicada em duas vias vira duas
+   * regras — bastaria uma delas esquecer o cancelamento no banco para o
+   * sistema passar a deixar boleto de pé conforme a tela usada.
+   *
+   * @param  int $id
+   * @param  int $idCompany
+   * @param  int $idUser
+   * @return array success, message (o texto já pronto para a tela)
+   */
+  private function derrubarCobranca($id, $idCompany, $idUser)
+  {
+    $this->load->model('psp_model');
+
+    $cobranca = $this->psp_model->cancelarCobranca(
+      $id,
+      $idCompany,
+      'Fatura cancelada no CDW Finance',
+      $idUser
+    );
+
+    if (empty($cobranca['success'])) {
+      return [
+        'success' => FALSE,
+        'message' => sprintf(
+          'A fatura NÃO foi cancelada, porque a cobrança não pôde ser cancelada no banco: %s'
+          . ' Cancelar só aqui deixaria o boleto de pé, e o cliente ainda conseguiria pagá-lo.'
+          . ' Tente de novo em instantes.',
+          $cobranca['message']
+        ),
+      ];
+    }
+
+    // A distinção importa para quem lê: "cancelei um boleto que existia" é
+    // diferente de "não havia boleto nenhum", e a segunda não deixa dúvida
+    // sobre o que o cliente pode ter em mãos.
+    return [
+      'success' => TRUE,
+      'message' => !empty($cobranca['data']['cancelou'])
+        ? ' O boleto foi cancelado no banco.'
+        : ' Não havia cobrança registrada no banco.',
+    ];
+  }
+
+  /**
+   * Cancela a fatura a partir das abas do contrato e do cliente.
+   *
+   * Mesma regra do post_status — derruba a cobrança primeiro e só então muda o
+   * status —, mas em AJAX: ali o usuário está no meio da tela do contrato, e
+   * um redirect para a lista de Faturas o tiraria do contexto.
+   */
+  public function json_postcancelar()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $id = (int) $this->input->post('id');
+    $idCompany = (int) $this->getCurrentCompanyId();
+    $idUser = (int) $this->session->userdata('user')->id;
+
+    $fatura = $this->global_model->getWhere_off('crm_invoices', [
+      'id' => $id,
+      'id_company' => $idCompany,
+    ], TRUE);
+
+    if (empty($fatura)) {
+      echo json_encode([
+        'success' => FALSE, 'return' => FALSE,
+        'message' => 'Fatura não encontrada.',
+        'data' => NULL, 'errors' => ['fatura' => 'Fatura não encontrada.'],
+      ]);
+      return;
+    }
+
+    // Mesma allowlist da outra via: só fatura aberta cancela, e o estado é
+    // conferido no servidor — o botão da tela some, mas o endpoint aceita POST
+    // direto.
+    if ((string) $fatura->status !== 'aberta') {
+      echo json_encode([
+        'success' => FALSE, 'return' => FALSE,
+        'message' => 'Só fatura em aberto pode ser cancelada.',
+        'data' => NULL, 'errors' => ['fatura' => 'Situação inválida.'],
+      ]);
+      return;
+    }
+
+    $derrubada = $this->derrubarCobranca($id, $idCompany, $idUser);
+
+    if (empty($derrubada['success'])) {
+      echo json_encode([
+        'success' => FALSE, 'return' => FALSE,
+        'message' => $derrubada['message'],
+        'data' => NULL, 'errors' => ['fatura' => $derrubada['message']],
+      ]);
+      return;
+    }
+
+    $this->global_model->edit('crm_invoices', [
+      'status' => 'cancelada',
+      'modified' => date('Y-m-d H:i:s'),
+      'modified_by' => $idUser,
+    ], 'id', $id);
+
+    echo json_encode([
+      'success' => TRUE, 'return' => TRUE,
+      'message' => 'Fatura cancelada.' . $derrubada['message'],
+      'data' => NULL, 'errors' => [],
+    ]);
+  }
   public function post_status()
   {
     $id = (int) $this->input->post('id');
@@ -271,13 +650,39 @@ class Faturas extends MY_Controller
       redirect(base_url('faturas'));
     }
 
+    $idUser = (int) $this->session->userdata('user')->id;
+    $complemento = '';
+
+    // CANCELAR A FATURA É CANCELAR A COBRANÇA PRIMEIRO — e só seguir se der
+    // certo.
+    //
+    // A ordem não é preferência: o boleto vive NO BANCO, não aqui. Marcar a
+    // fatura como cancelada sem derrubar a cobrança deixaria um boleto
+    // perfeitamente pagável em pé — o cliente paga, o dinheiro entra, e do
+    // lado de cá a fatura consta cancelada e ninguém concilia. É o mesmo
+    // raciocínio da troca de provedor, onde o cancelamento também vem antes.
+    //
+    // Falhando o cancelamento no banco, a fatura FICA EM ABERTO. Entre "não
+    // cancelou" e "cancelou aqui e continua cobrando lá", o primeiro é o erro
+    // que se percebe e se repete.
+    if ($acao === 'cancelar') {
+      $derrubada = $this->derrubarCobranca($id, (int) $this->getCurrentCompanyId(), $idUser);
+
+      if (empty($derrubada['success'])) {
+        $this->session->set_flashdata('warning', $derrubada['message']);
+        redirect(base_url('faturas'));
+      }
+
+      $complemento = $derrubada['message'];
+    }
+
     $this->global_model->edit('crm_invoices', [
       'status' => $transicoes[$acao]['para'],
       'modified' => date('Y-m-d H:i:s'),
-      'modified_by' => (int) $this->session->userdata('user')->id,
+      'modified_by' => $idUser,
     ], 'id', $id);
 
-    $this->session->set_flashdata('success', $transicoes[$acao]['ok']);
+    $this->session->set_flashdata('success', $transicoes[$acao]['ok'] . $complemento);
     redirect(base_url('faturas'));
   }
 

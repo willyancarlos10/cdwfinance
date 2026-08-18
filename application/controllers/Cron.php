@@ -437,6 +437,35 @@ class Cron extends CI_Controller
       }
     }
 
+    // ----------------------------------------------------------------
+    // Fase 2: as faturas viram cobrança de verdade no PSP.
+    //
+    // Separada da geração de propósito. A fatura é gravada em transação
+    // própria e protegida pela UNIQUE; a ida ao PSP é rede, e rede falha. Se
+    // as duas andassem juntas, uma indisponibilidade do banco impediria a
+    // fatura de existir — e o motor perderia a competência.
+    //
+    // Aqui não há fila em tabela: fatura aberta com `psp_charge_id` vazio JÁ
+    // é a lista do que falta. O que não couber no orçamento de tempo fica
+    // para a próxima rodada, e a repetição continua de onde parou.
+    // ----------------------------------------------------------------
+    $this->load->model('psp_model');
+
+    $cobrancas = $this->psp_model->processarPendentes(['id_user' => $idUser]);
+
+    echo sprintf(
+      '  cobranças: %d registrada(s), %d atualizada(s), %d falha(s).%s',
+      $cobrancas['registradas'],
+      $cobrancas['sincronizadas'],
+      $cobrancas['falhas'],
+      PHP_EOL
+    );
+
+    foreach ($cobrancas['mensagens'] as $mensagem) {
+      echo '  [COBRANÇA] ' . $mensagem . PHP_EOL;
+      $mensagensDeErro[] = $mensagem;
+    }
+
     $this->global_model->edit('crm_cron_logs', [
       'modified' => date('Y-m-d H:i:s'),
       'errors' => empty($mensagensDeErro) ? NULL : mb_substr(implode(' | ', $mensagensDeErro), 0, 5000),

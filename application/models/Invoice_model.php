@@ -102,12 +102,27 @@ class Invoice_model extends CI_Model
     /**
      * Gera as faturas pendentes de um contrato.
      *
+     * `$maxCompetencias` e `$antecedencia` respondem perguntas diferentes, e
+     * confundi-las foi o defeito que a etapa A2 expôs:
+     *
+     *  - a ANTECEDÊNCIA diz "quão perto do vencimento a fatura pode nascer";
+     *  - o TETO diz "quantos meses de uma vez".
+     *
+     * O cron usa antecedência curta (10 dias) e teto alto, e por isso já
+     * gerava mês a mês: só entra a competência cujo vencimento está chegando,
+     * e o teto alto serve para um contrato ATRASADO se recuperar, gerando as
+     * competências vencidas na ordem. O botão GERAR FATURA usava antecedência
+     * de 366 dias para poder forçar a competência corrente — mas, sem teto,
+     * isso varria um ano inteiro e criava 12 faturas de uma vez. Com a
+     * cobrança no PSP, cada uma dessas viraria um boleto no banco do cliente.
+     *
      * @param  object   $contrato linha de crm_contracts
      * @param  int      $idUser   autor das linhas
      * @param  int|null $antecedencia dias; NULL = parâmetro global
+     * @param  int|null $maxCompetencias meses de uma vez; NULL = teto da rodada
      * @return array success, message, data => ['geradas', 'competencias']
      */
-    public function generateForContract($contrato, $idUser, $antecedencia = NULL)
+    public function generateForContract($contrato, $idUser, $antecedencia = NULL, $maxCompetencias = NULL)
     {
         $meses = $this->mesesDoCiclo($contrato->cycle);
         if ($meses === 0) {
@@ -147,7 +162,14 @@ class Invoice_model extends CI_Model
         $geradas = 0;
         $competencias = [];
 
-        for ($i = 0; $i < self::MAX_COMPETENCIAS_POR_RODADA; $i++) {
+        // O teto da rodada continua sendo o limite absoluto: um next_competence
+        // corrompido não pode virar laço infinito, mesmo que quem chamou peça
+        // mais.
+        $teto = ($maxCompetencias === NULL)
+            ? self::MAX_COMPETENCIAS_POR_RODADA
+            : max(1, min((int) $maxCompetencias, self::MAX_COMPETENCIAS_POR_RODADA));
+
+        for ($i = 0; $i < $teto; $i++) {
             // A competência abre quando a PRIMEIRA parcela entra na janela — é
             // a mesma conta de antes, porque a parcela 1 vence no mês da
             // competência. As demais nascem junto, com vencimento à frente.
@@ -281,9 +303,38 @@ class Invoice_model extends CI_Model
             return $this->resposta(FALSE, 'Só contrato vigente gera fatura.', 0, []);
         }
 
-        // Antecedência folgada: gera a competência corrente mesmo que o
-        // vencimento ainda esteja distante.
-        return $this->generateForContract($contrato, $idUser, 366);
+        // O botão NÃO ANTECIPA O FUTURO. Duas travas, e as duas são
+        // necessárias:
+        //
+        // 1. teto de UMA competência por chamada — sem ele, a antecedência
+        //    larga (abaixo) varria doze meses de uma vez;
+        // 2. esta guarda do mês corrente — sem ela, cliques repetidos marcham
+        //    mês a mês para frente, e doze cliques recriam exatamente o
+        //    problema que o teto resolveu.
+        //
+        // Com a cobrança registrada no PSP, cada competência a mais é um
+        // boleto a mais na conta do cliente, e boleto emitido por engano se
+        // cancela no banco — não some.
+        $competencia = $this->primeiroDiaDoMes((string) $contrato->next_competence);
+        if ($competencia === NULL) {
+            return $this->resposta(FALSE, 'Competência inicial inválida no contrato.', 0, []);
+        }
+
+        $mesCorrente = date('Y-m-01');
+        if ($competencia > $mesCorrente) {
+            return $this->resposta(FALSE, sprintf(
+                'A próxima competência deste contrato é %s, que ainda não chegou. O cron a gera sozinho quando o vencimento se aproximar — este botão só serve para antecipar a competência do mês corrente ou recuperar competências atrasadas.',
+                date('m/Y', strtotime($competencia))
+            ), 0, []);
+        }
+
+        // A antecedência larga é o que dá sentido ao botão: forçar a
+        // competência corrente mesmo quando o vencimento está longe e o cron
+        // portanto não a geraria. Contrato atrasado recupera UMA competência
+        // por clique, da mais antiga para a mais nova — cada clique é um
+        // boleto, e emitir quatro de uma vez por engano não tem desfazer
+        // barato.
+        return $this->generateForContract($contrato, $idUser, 366, 1);
     }
 
     // ------------------------------------------------------------------
@@ -354,6 +405,12 @@ class Invoice_model extends CI_Model
             'invoice_policy' => isset($parcela['invoice_policy']) && $parcela['invoice_policy'] !== NULL
                 ? (string) $parcela['invoice_policy']
                 : (string) $contrato->invoice_policy,
+            // SNAPSHOT DE ROTEAMENTO, não redundância com o contrato: se o
+            // contrato trocar de PSP em março, a cobrança de janeiro continua
+            // viva no PSP antigo, e é esta coluna que diz a quem perguntar na
+            // conciliação, no cancelamento e no webhook. Ler do contrato na
+            // hora de consultar erraria exatamente depois de uma troca.
+            'psp' => (string) $contrato->psp,
             'created' => date('Y-m-d H:i:s'),
             'created_by' => (int) $idUser,
         ];
@@ -563,6 +620,35 @@ class Invoice_model extends CI_Model
      * @param  int    $porPagina
      * @return array|null NULL quando o escopo é desconhecido
      */
+    /**
+     * Quantas faturas existem naquele escopo.
+     *
+     * Existe separado do `listarPorEscopo()` porque o badge da aba é desenhado
+     * no carregamento da PÁGINA, e a aba só busca a lista quando é aberta
+     * (carga lazy). Reusar o outro método aqui traria itens, somas e paginação
+     * para responder um número — e o faria em toda visita, inclusive quando a
+     * aba nunca é aberta.
+     *
+     * Mesma allowlist do outro: escopo desconhecido é NULL, nunca "traz tudo".
+     *
+     * @param  string $escopo contrato | cliente
+     * @param  int    $id
+     * @param  int    $idCompany
+     * @return int|null
+     */
+    public function contarPorEscopo($escopo, $id, $idCompany)
+    {
+        $colunas = ['contrato' => 'id_contract', 'cliente' => 'id_customer'];
+        if (!isset($colunas[(string) $escopo])) return NULL;
+
+        $consulta = $this->db->query(
+            "SELECT COUNT(*) AS n FROM crm_invoices WHERE id_company = ? AND {$colunas[(string) $escopo]} = ?",
+            [(int) $idCompany, (int) $id]
+        );
+
+        return ($consulta === FALSE) ? 0 : (int) $consulta->row()->n;
+    }
+
     public function listarPorEscopo($escopo, $id, $idCompany, $pagina = 1, $porPagina = self::PER_PAGE_ABA)
     {
         $colunas = ['contrato' => 'id_contract', 'cliente' => 'id_customer'];
@@ -607,7 +693,8 @@ class Invoice_model extends CI_Model
                 "SELECT id, id_contract, id_customer, competence, due_date, value,
                         status, situation, description, invoice_policy,
                         id_charge, installment_number, installments_total,
-                        charge_description, contract_cycle, contract_status, created
+                        charge_description, contract_cycle, contract_status, created,
+                        psp, registration, linha_digitavel, link_pix
                    FROM crm_invoices_v
                   WHERE id_company = ? AND {$coluna} = ?
                   ORDER BY due_date DESC, id DESC

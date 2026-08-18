@@ -59,9 +59,10 @@ credencial do Inter neste projeto.
 | Autenticação é **OAuth 2.0 sobre mTLS** | portal + página de integração do Inter |
 | Certificados saem do internet banking, por integração, com escopos escolhidos na criação | fluxo "Nova integração" documentado |
 
-### Fonte secundária — **confirmar antes de escrever a library**
+### Confirmado contra o SANDBOX REAL (18/08/2026)
 
-Isto veio de SDKs da comunidade e bases de conhecimento de terceiros, não da doc oficial:
+Com a credencial de sandbox da CDW, exercitado pela `Psp_inter`. O que era fonte
+secundária deixou de ser suposição:
 
 | Item | Valor encontrado |
 |---|---|
@@ -73,6 +74,39 @@ Isto veio de SDKs da comunidade e bases de conhecimento de terceiros, não da do
 | Operações | emitir · recuperar · PDF · cancelar/baixar · pesquisar · webhook (criar/consultar/excluir) + listagem de callbacks |
 | Header de conta | `x-conta-corrente`, quando o mesmo `client_id` atende mais de uma conta |
 
+**Corrigido pelo sandbox** — o que a fonte secundária tinha errado:
+
+| Item | Suposto | Real |
+|---|---|---|
+| **Caminho do webhook** | `/cobranca/v3/webhook` | **`/cobranca/v3/cobrancas/webhook`** |
+| **Envelope da listagem** | `paginacao.quantidadeTotalDeItens` | **topo**: `totalPaginas`, `totalElementos`, `tamanhoPagina`, `primeiraPagina`, `ultimaPagina`, `numeroDeElementos`, `cobrancas[]` |
+
+A distinção que resolveu o caminho do webhook: `/cobranca/v3/cobrancas/webhook`
+devolve **404 em JSON** (`{"title":"Webhook não existe"...}`) — recurso ainda não
+criado —, enquanto os caminhos inexistentes devolvem **404 em texto puro**
+(`404 page not found`), que é o gateway. Um diz "ainda não há", o outro "não
+existe rota".
+
+**Comportamento medido, que molda o código:**
+
+| Fato | Consequência |
+|---|---|
+| `GET /cobranca/v3/cobrancas` **sem** `dataInicial`/`dataFinal` devolve **400** | as datas são obrigatórias; `filtrarDataPor` **não** é |
+| `paginaAtual` é **0-based** e funciona | a conversão de 1-based fica na library, não vaza para o model |
+| **~6 chamadas seguidas já devolvem 429**, com **corpo vazio** | rate limit ainda mais agressivo que o do Bom Controle (~12). Pesa na etapa A2: contrato anual em 12× emite 12 cobranças numa rodada |
+| O **500** do Inter diz *"Tente novamente mais tarde"* | é transitório. Entrou no retry — **só em GET**, porque repetir um POST emitiria o boleto duas vezes |
+| Token: `expires_in` 3600, `access_token` de 36 chars | o cache por conta se paga já na primeira rodada |
+| **`Accept: application/json` faz o cancelamento responder 406** | o `POST .../cancelar` devolve **202 sem corpo**, e exigir JSON o faz recusar. A library manda **`Accept: */*`** — os endpoints que devolvem JSON continuam devolvendo |
+| O cancelamento responde **202**, não 200/204 | é **assíncrono**, como a emissão: o banco aceita o pedido e a cobrança sai do ar em instantes |
+| `POST .../cancelar` só aceita **POST** | `DELETE` e `PUT` devolvem `405 method not allowed` |
+| **`GET .../pdf` devolve base64 dentro de JSON** (chave `pdf`) | confirmado: decodifica em PDF válido de ~69 KB (assinatura `%PDF-`). Não há URL pública do boleto |
+| **`seuNumero` volta na listagem**, em 19/19 itens | é o que permite **adotar** uma cobrança órfã depois de um POST ambíguo, sem depender do `psp_charge_id` perdido |
+
+> A armadilha do 406 custa caro no diagnóstico: a mensagem que volta é a genérica
+> *"verifique se os dados informados estão de acordo com a documentação"*, que aponta para o
+> **payload** — e não para o cabeçalho, que é onde o problema está. Foram seis valores de
+> `motivoCancelamento` testados antes de a variação de cabeçalho revelar a causa.
+
 ---
 
 ## Aderência aos três critérios da etapa A
@@ -83,7 +117,7 @@ para a conciliação (etapa D)"*.
 | Critério | Inter | Observação |
 |---|---|---|
 | **Boleto e PIX na mesma cobrança** | ✅ | É o produto "Boleto com PIX" (bolepix). Uma cobrança → `linhaDigitavel` **e** `pixCopiaECola`. A `crm_invoices` guarda `link_boleto` e `link_pix` da mesma linha, sem conciliar duas cobranças |
-| **Webhook de liquidação** | ✅ com ressalva | Existe e é registrável por API. **A assinatura não foi confirmada** — ver risco abaixo |
+| **Webhook de liquidação** | ✅ com ressalva | Caminho confirmado no sandbox (`/cobranca/v3/cobrancas/webhook`). **A assinatura não foi confirmada** — ver risco abaixo |
 | **Listagem para conciliação** | ✅ | Pesquisa de cobranças por período/situação, com paginação — é o insumo do `cron_conciliar_cobrancas` |
 
 O casamento com o desenho já pronto é direto:
