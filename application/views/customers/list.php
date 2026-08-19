@@ -141,7 +141,7 @@ $temFiltro = ($fKeyword !== '' || !empty($chips));
                 <option <?php if ($fServico === (int) $st->id) echo 'selected=""'; ?> value="<?php echo (int) $st->id; ?>"><?php echo htmlspecialchars($st->name, ENT_QUOTES, 'UTF-8'); ?></option>
               <?php } ?>
             </select>
-            <small class="form-text text-muted">Considera os contratos de qualquer situação — inclusive os encerrados.</small>
+            <small class="form-text text-muted">Considera contratos em qualquer situação (inclusive encerrados).</small>
           </div>
 
           <div class="form-group mb-3">
@@ -152,7 +152,7 @@ $temFiltro = ($fKeyword !== '' || !empty($chips));
                 <option <?php if ($fSituacao === $alias) echo 'selected=""'; ?> value="<?php echo $alias; ?>"><?php echo $rotulo; ?></option>
               <?php } ?>
             </select>
-            <small class="form-text text-muted">Cliente vigente é o que tem pelo menos um contrato com status <strong>vigente</strong>.</small>
+            <small class="form-text text-muted">Cliente vigente é o que tem pelo menos um contrato vigente.</small>
           </div>
 
           <div class="form-group mb-3">

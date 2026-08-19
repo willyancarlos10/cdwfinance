@@ -1774,4 +1774,568 @@ class Bomcontrole_model extends CI_Model
         }
         return $padrao;
     }
+    // ------------------------------------------------------------------
+    // Emissão da nota fiscal (etapa E)
+    // ------------------------------------------------------------------
+
+    /** Estados de `crm_invoices.nf_status`. */
+    const NF_PENDENTE = 'pendente';
+    const NF_VENDA_CRIADA = 'venda_criada';
+    const NF_EMITIDA = 'emitida';
+    const NF_FALHA = 'falha';
+
+    /** Tentativas antes de a falha temporária virar definitiva. */
+    const NF_MAX_TENTATIVAS = 5;
+
+    /** Teto de notas por rodada — três chamadas ao ERP cada uma. */
+    const NF_MAX_POR_RODADA = 20;
+
+    /** Espaçamento entre notas: o ERP devolve 429 em ~12 chamadas seguidas. */
+    const NF_ESPACAMENTO_MICROSSEGUNDOS = 1500000;
+
+    /**
+     * Resolve e grava o `IdEmpresa` do tenant no ERP.
+     *
+     * Leitura pura (`Empresa/Pesquisar`) — não cria nem altera nada lá.
+     *
+     * ⚠️ DESCOBERTO NA CONTA REAL (19/08/2026), e é o que molda este método:
+     *
+     *  - **`Empresa/Pesquisar` NÃO filtra por documento.** Passar o CNPJ, com
+     *    ou sem máscara, devolve lista vazia; a busca só casa por NOME. Por
+     *    isso a chamada é feita com o termo **vazio**, que devolve todas as
+     *    empresas da conta — a chave da API já escopa o resultado ao tenant.
+     *  - **O CNPJ do cadastro local pode divergir do que está no ERP** (na
+     *    conta da CDW, diverge). Então o documento **não serve de âncora**:
+     *    ele vira CONFERÊNCIA, mostrada ao usuário, e não critério de recusa.
+     *
+     * Com uma empresa só na conta, ela é adotada — mas a resposta sempre diz
+     * qual nome e qual documento foram gravados, para a divergência ficar
+     * visível em vez de silenciosa. Com várias, o documento decide; e se
+     * nenhuma casar, a lista volta na mensagem para uma escolha humana, em vez
+     * de o sistema chutar a primeira.
+     *
+     * @param  int $idCompany
+     * @param  int $idUser
+     * @return array success, message, data => ['id', 'nome', 'documento', 'divergente']
+     */
+    public function resolverIdEmpresa($idCompany, $idUser)
+    {
+        // A coluna do documento em `crm_companies` chama-se `cnpj` — o cliente
+        // final é que tem `document`. São cadastros diferentes.
+        $empresa = $this->global_model->getFieldsWhereSingle_off(
+            'crm_companies',
+            'id, name, byname, cnpj',
+            ['id' => (int) $idCompany],
+            TRUE
+        );
+
+        if (empty($empresa)) {
+            return $this->respostaNf(FALSE, 'Empresa não encontrada.');
+        }
+
+        $documentoLocal = preg_replace('/\D/', '', (string) $empresa->cnpj);
+
+        $config = $this->getConfig($idCompany);
+        if (!$config['success']) {
+            return $this->respostaNf(FALSE, $config['message']);
+        }
+
+        // Termo VAZIO de propósito: é assim que o endpoint lista tudo.
+        $sessao = sessao_suspender();
+        try {
+            $resultado = $this->client()->pesquisarEmpresas($config['config'], '');
+        } finally {
+            sessao_retomar($sessao);
+        }
+
+        if (empty($resultado['success'])) {
+            $this->logarErroServico($idCompany, 'pesquisarEmpresas', (string) $resultado['message']);
+            return $this->respostaNf(FALSE, (string) $resultado['message']);
+        }
+
+        $dados = $resultado['data'];
+        $itens = (is_array($dados) && isset($dados['Itens']) && is_array($dados['Itens']))
+            ? $dados['Itens']
+            : (array) $dados;
+
+        $candidatas = [];
+        foreach ($itens as $item) {
+            if (!is_array($item)) continue;
+
+            $id = (int) $this->campo($item, ['Id'], 0);
+            if ($id <= 0) continue;
+
+            $candidatas[] = [
+                'id' => $id,
+                'nome' => (string) $this->campo($item, ['Nome', 'RazaoSocial'], ''),
+                'documento' => preg_replace('/\D/', '', (string) $this->campo($item, ['Documento', 'Cnpj', 'CpfCnpj'], '')),
+                'padrao' => !empty($this->campo($item, ['Padrao'], FALSE)),
+            ];
+        }
+
+        if (empty($candidatas)) {
+            return $this->respostaNf(FALSE, 'O Bom Controle não devolveu nenhuma empresa para esta chave.');
+        }
+
+        $achada = NULL;
+
+        if (count($candidatas) === 1) {
+            // Conta com uma empresa só: é ela. A chave da API já delimita o
+            // escopo, então não há o que escolher.
+            $achada = $candidatas[0];
+        } else {
+            foreach ($candidatas as $c) {
+                if ($documentoLocal !== '' && $c['documento'] === $documentoLocal) {
+                    $achada = $c;
+                    break;
+                }
+            }
+        }
+
+        if ($achada === NULL) {
+            // Várias e nenhuma casa: NÃO chutar. Devolve a lista para uma
+            // escolha humana — gravar a empresa errada faria toda nota futura
+            // sair no CNPJ errado, e isso é problema fiscal.
+            $lista = [];
+            foreach ($candidatas as $c) {
+                $lista[] = '#' . $c['id'] . ' ' . $c['nome'] . ' (' . ($c['documento'] ?: 'sem documento') . ')';
+            }
+
+            return $this->respostaNf(FALSE, 'O Bom Controle devolveu ' . count($candidatas)
+                . ' empresas e nenhuma tem o CNPJ desta empresa: ' . implode(' · ', $lista)
+                . '. Ajuste o CNPJ no cadastro ou informe o Id manualmente.');
+        }
+
+        $this->global_model->edit('crm_companies', [
+            'bomcontrole_company_id' => (int) $achada['id'],
+            'modified' => date('Y-m-d H:i:s'),
+            'modified_by' => (int) $idUser,
+        ], 'id', (int) $idCompany);
+
+        $divergente = ($documentoLocal !== '' && $achada['documento'] !== '' && $achada['documento'] !== $documentoLocal);
+
+        $mensagem = 'Empresa vinculada: #' . $achada['id'] . ' ' . $achada['nome']
+            . ' (' . ($achada['documento'] ?: 'sem documento') . ').';
+
+        if ($divergente) {
+            // Aviso, não erro: quem decide se o cadastro local está errado ou
+            // se são entidades diferentes é uma pessoa, não este método.
+            $mensagem .= ' ATENÇÃO: o CNPJ no Bom Controle difere do cadastrado aqui ('
+                . $documentoLocal . ') — confira antes de emitir nota.';
+        }
+
+        return $this->respostaNf(TRUE, $mensagem, [
+            'id' => (int) $achada['id'],
+            'nome' => $achada['nome'],
+            'documento' => $achada['documento'],
+            'divergente' => $divergente,
+        ]);
+    }
+    /**
+     * Faturas esperando emissão da nota.
+     *
+     * `falha` fica de fora: erro definitivo espera gente, e retentá-lo em laço
+     * queima quota e esconde o problema.
+     *
+     * @param  int $limite
+     * @return array
+     */
+    public function filaNotas($limite = self::NF_MAX_POR_RODADA)
+    {
+        $limite = max(1, (int) $limite);
+
+        $consulta = $this->db->query(
+            "SELECT `id`, `id_company`
+               FROM `crm_invoices`
+              WHERE `nf_status` IN (?, ?)
+                AND `nf_attempts` < ?
+              ORDER BY `id` ASC
+              LIMIT " . $limite,
+            [self::NF_PENDENTE, self::NF_VENDA_CRIADA, self::NF_MAX_TENTATIVAS]
+        );
+
+        return ($consulta === FALSE) ? [] : $consulta->result();
+    }
+
+    /**
+     * Coloca a fatura na fila da nota fiscal.
+     *
+     * DUAS PORTAS DE ENTRADA, e é o `invoice_policy` que decide qual:
+     *  - `com_boleto` — enfileira na GERAÇÃO da fatura, porque a nota tem de
+     *    existir antes do envio (ela vai no mesmo e-mail do boleto);
+     *  - `pos_compensacao` — enfileira na BAIXA, porque o gatilho é o
+     *    pagamento;
+     *  - `nao_emitir` — não entra.
+     *
+     * @param  int    $idInvoice
+     * @param  string $gatilho 'geracao' | 'baixa'
+     * @return bool entrou na fila?
+     */
+    public function enfileirarNota($idInvoice, $gatilho)
+    {
+        $fatura = $this->global_model->getFieldsWhereSingle_off(
+            'crm_invoices',
+            'id, invoice_policy, nf_status',
+            ['id' => (int) $idInvoice],
+            TRUE
+        );
+
+        if (empty($fatura)) return FALSE;
+
+        // Já na fila ou já emitida: reenfileirar zeraria o histórico de
+        // tentativas e, no pior caso, mandaria emitir de novo.
+        if ((string) $fatura->nf_status !== '') return FALSE;
+
+        $politica = (string) $fatura->invoice_policy;
+
+        $esperado = ($politica === 'com_boleto') ? 'geracao'
+            : (($politica === 'pos_compensacao') ? 'baixa' : '');
+
+        if ($esperado === '' || $esperado !== $gatilho) return FALSE;
+
+        $this->global_model->edit('crm_invoices', [
+            'nf_status' => self::NF_PENDENTE,
+            'nf_attempts' => 0,
+            'nf_last_error' => NULL,
+        ], 'id', (int) $idInvoice);
+
+        return TRUE;
+    }
+
+    /**
+     * Emite a nota de UMA fatura: as três chamadas encadeadas.
+     *
+     * A MÁQUINA DE ESTADOS É O QUE IMPEDE NOTA DUPLICADA. Cada passo só roda se
+     * o anterior não tiver deixado rastro:
+     *
+     *   sem `bomcontrole_sale_id`    → cria a venda (emite a nota)
+     *   sem `bomcontrole_invoice_id` → lê o Id da fatura do ERP
+     *   então                        → dá baixa e busca os links
+     *
+     * Uma falha na baixa **nunca** faz a venda ser recriada na próxima
+     * tentativa: `bomcontrole_sale_id` preenchido significa nota já emitida, e
+     * recriá-la emitiria uma segunda, que só se resolve com carta de correção.
+     *
+     * @param  int $idInvoice
+     * @param  int $idCompany
+     * @param  int $idUser
+     * @return array success, message, data => ['status']
+     */
+    public function emitirNota($idInvoice, $idCompany, $idUser)
+    {
+        $fatura = $this->global_model->getWhere_off('crm_invoices', [
+            'id' => (int) $idInvoice,
+            'id_company' => (int) $idCompany,
+        ], TRUE);
+
+        if (empty($fatura)) {
+            return $this->respostaNf(FALSE, 'Fatura não encontrada.');
+        }
+
+        if (!in_array((string) $fatura->nf_status, [self::NF_PENDENTE, self::NF_VENDA_CRIADA], TRUE)) {
+            return $this->respostaNf(FALSE, 'Esta fatura não está na fila de emissão.');
+        }
+
+        $empresa = $this->global_model->getFieldsWhereSingle_off(
+            'crm_companies',
+            'bomcontrole_company_id',
+            ['id' => (int) $idCompany],
+            TRUE
+        );
+
+        $idEmpresaBc = empty($empresa) ? 0 : (int) $empresa->bomcontrole_company_id;
+        if ($idEmpresaBc <= 0) {
+            // DEFINITIVO: falta configuração, e tentar de novo não resolve.
+            return $this->falharNota($fatura, 'A empresa não tem IdEmpresa do Bom Controle. Resolva em Empresas › Bom Controle.', TRUE, $idUser);
+        }
+
+        $contrato = $this->global_model->getWhere_off('crm_contracts', ['id' => (int) $fatura->id_contract], TRUE);
+        $cliente = $this->global_model->getWhere_off('crm_customers', ['id' => (int) $fatura->id_customer], TRUE);
+
+        if (empty($contrato) || empty($cliente)) {
+            return $this->falharNota($fatura, 'Contrato ou cliente da fatura não encontrado.', TRUE, $idUser);
+        }
+
+        if ((int) $contrato->bomcontrole_service_id <= 0) {
+            return $this->falharNota($fatura, 'O contrato não tem serviço do Bom Controle vinculado — sem ele a nota não tem o que descrever.', TRUE, $idUser);
+        }
+
+        if ((int) $cliente->bomcontrole_customer_id <= 0) {
+            return $this->falharNota($fatura, 'O cliente ainda não foi sincronizado com o Bom Controle.', TRUE, $idUser);
+        }
+
+        $config = $this->getConfig($idCompany);
+        if (!$config['success']) {
+            return $this->falharNota($fatura, $config['message'], FALSE, $idUser);
+        }
+
+        // ---------- passo 1: criar a venda (emite a nota) ----------
+        $idVenda = (int) $fatura->bomcontrole_sale_id;
+
+        if ($idVenda <= 0) {
+            $payload = $this->montarPayloadVenda($fatura, $contrato, $cliente, $idEmpresaBc);
+
+            $sessao = sessao_suspender();
+            try {
+                $r = $this->client()->criarVendaProdutoServico($config['config'], $payload);
+            } finally {
+                sessao_retomar($sessao);
+            }
+
+            if (empty($r['success'])) {
+                return $this->falharNota($fatura, 'Criar venda: ' . $r['message'], $this->nfDefinitivo($r), $idUser);
+            }
+
+            // Igual ao Cliente/Criar: o Id volta como INTEIRO PURO no corpo.
+            $idVenda = (int) (is_array($r['data']) ? (isset($r['data']['Id']) ? $r['data']['Id'] : 0) : $r['data']);
+
+            if ($idVenda <= 0) {
+                return $this->falharNota($fatura, 'O Bom Controle aceitou a venda mas não devolveu o Id.', TRUE, $idUser);
+            }
+
+            // GRAVA IMEDIATAMENTE: a partir daqui a nota existe no ERP, e uma
+            // falha adiante não pode fazer a próxima rodada criar outra.
+            $this->global_model->edit('crm_invoices', [
+                'bomcontrole_sale_id' => $idVenda,
+                'nf_status' => self::NF_VENDA_CRIADA,
+            ], 'id', (int) $idInvoice);
+
+            $fatura->bomcontrole_sale_id = $idVenda;
+            $fatura->nf_status = self::NF_VENDA_CRIADA;
+        }
+
+        // ---------- passo 2: descobrir o Id da fatura no ERP ----------
+        $idFaturaBc = (int) $fatura->bomcontrole_invoice_id;
+
+        if ($idFaturaBc <= 0) {
+            $sessao = sessao_suspender();
+            try {
+                $r = $this->client()->obterVenda($config['config'], $idVenda);
+            } finally {
+                sessao_retomar($sessao);
+            }
+
+            if (empty($r['success'])) {
+                return $this->falharNota($fatura, 'Obter venda: ' . $r['message'], $this->nfDefinitivo($r), $idUser);
+            }
+
+            $idFaturaBc = $this->extrairIdFatura($r['data']);
+
+            if ($idFaturaBc <= 0) {
+                // Pode ser processamento assíncrono no ERP: temporário.
+                return $this->falharNota($fatura, 'A venda foi criada mas o Bom Controle ainda não devolveu o Id da fatura.', FALSE, $idUser);
+            }
+
+            $this->global_model->edit('crm_invoices', [
+                'bomcontrole_invoice_id' => $idFaturaBc,
+            ], 'id', (int) $idInvoice);
+        }
+
+        // ---------- passo 3: baixa no financeiro do ERP ----------
+        $quitacao = !empty($fatura->paid_at)
+            ? date('Y-m-d H:i:s', strtotime((string) $fatura->paid_at))
+            : date('Y-m-d H:i:s');
+
+        $sessao = sessao_suspender();
+        try {
+            $r = $this->client()->efeturarPagamentoFatura($config['config'], $idFaturaBc, [
+                'ValorLiquido' => (float) (!empty($fatura->paid_amount) ? $fatura->paid_amount : $fatura->value),
+                'DataQuitacao' => $quitacao,
+                'DataConciliacao' => $quitacao,
+                'GerarResiduo' => FALSE,
+            ]);
+        } finally {
+            sessao_retomar($sessao);
+        }
+
+        if (empty($r['success'])) {
+            return $this->falharNota($fatura, 'Baixa no ERP: ' . $r['message'], $this->nfDefinitivo($r), $idUser);
+        }
+
+        // ---------- links do PDF e do XML (etapa F) ----------
+        $links = $this->linksDaNota($config['config'], $idFaturaBc);
+
+        $campos = [
+            'nf_status' => self::NF_EMITIDA,
+            'nf_issued_at' => date('Y-m-d H:i:s'),
+            'nf_last_error' => NULL,
+            'modified' => date('Y-m-d H:i:s'),
+            'modified_by' => (int) $idUser,
+        ];
+
+        if ($links['pdf'] !== '') $campos['link_nota_fiscal'] = $links['pdf'];
+        if ($links['xml'] !== '') $campos['link_nota_fiscal_xml'] = $links['xml'];
+
+        $this->global_model->edit('crm_invoices', $campos, 'id', (int) $idInvoice);
+
+        return $this->respostaNf(TRUE, 'Nota emitida (venda ' . $idVenda . ', fatura ' . $idFaturaBc . ').', [
+            'status' => self::NF_EMITIDA,
+        ]);
+    }
+
+    /**
+     * Monta o corpo do `CriarVendaProdutoServico`.
+     *
+     * UM item com o valor da fatura, e não rateio entre os tipos de serviço: o
+     * vínculo é do CONTRATO (migration 025), e 215 contratos têm dois tipos —
+     * ratear inventaria números que apareceriam na nota do cliente.
+     *
+     * `FormaPagamento.Boleto` é OMITIDO: o boleto é do PSP, e informá-lo aqui
+     * mandaria uma segunda cobrança.
+     *
+     * @param  object $fatura
+     * @param  object $contrato
+     * @param  object $cliente
+     * @param  int    $idEmpresaBc
+     * @return array
+     */
+    private function montarPayloadVenda($fatura, $contrato, $cliente, $idEmpresaBc)
+    {
+        $descricao = trim((string) $fatura->description);
+        if ($descricao === '') $descricao = 'Serviços contratados';
+
+        return [
+            'IdEmpresa' => (int) $idEmpresaBc,
+            'IdCliente' => (int) $cliente->bomcontrole_customer_id,
+            'DataVenda' => date('Y-m-d H:i:s'),
+            'Itens' => [[
+                'IdServico' => (int) $contrato->bomcontrole_service_id,
+                'Descricao' => mb_substr($descricao, 0, 200),
+                'Quantidade' => 1,
+                'ValorUnitario' => (float) $fatura->value,
+            ]],
+            'NotaFiscalServico' => [
+                'Emite' => TRUE,
+                'NotaFiscalTotal' => (float) $fatura->value,
+            ],
+        ];
+    }
+
+    /**
+     * Acha o Id da Fatura na resposta do `Venda/Obter`.
+     *
+     * O formato varia entre envelope e array de parcelas, então a busca é
+     * tolerante: a primeira chave reconhecível vale.
+     *
+     * @param  mixed $dados
+     * @return int
+     */
+    private function extrairIdFatura($dados)
+    {
+        if (!is_array($dados)) return 0;
+
+        foreach (['IdFatura', 'FaturaId', 'Id_Fatura'] as $chave) {
+            if (!empty($dados[$chave])) return (int) $dados[$chave];
+        }
+
+        foreach (['Faturas', 'Parcelas', 'Itens'] as $lista) {
+            if (empty($dados[$lista]) || !is_array($dados[$lista])) continue;
+
+            foreach ($dados[$lista] as $item) {
+                if (!is_array($item)) continue;
+                foreach (['IdFatura', 'Id'] as $chave) {
+                    if (!empty($item[$chave])) return (int) $item[$chave];
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    /**
+     * Links do PDF e do XML da nota.
+     *
+     * Falha aqui NÃO derruba a emissão: a nota já foi emitida, e os links são
+     * conveniência da etapa F — que pode buscá-los depois.
+     *
+     * @param  array $config
+     * @param  int   $idFaturaBc
+     * @return array pdf, xml
+     */
+    private function linksDaNota(array $config, $idFaturaBc)
+    {
+        $sessao = sessao_suspender();
+        try {
+            $r = $this->client()->obterFatura($config, $idFaturaBc);
+        } finally {
+            sessao_retomar($sessao);
+        }
+
+        if (empty($r['success']) || !is_array($r['data'])) {
+            return ['pdf' => '', 'xml' => ''];
+        }
+
+        $d = $r['data'];
+
+        return [
+            'pdf' => (string) ($d['LinkNotaFiscalServico'] ?? $d['LinkNotaFiscal'] ?? ''),
+            'xml' => (string) ($d['LinkNotaFiscalServicoXml'] ?? $d['LinkNotaFiscalXml'] ?? ''),
+        ];
+    }
+
+    /**
+     * Registra a falha e decide se ela é definitiva.
+     *
+     * Temporária incrementa a tentativa e volta para a fila; definitiva marca
+     * `falha` e sai — erro de configuração ou dado inválido não melhora com
+     * repetição, e insistir queima quota e esconde o problema de quem poderia
+     * corrigi-lo.
+     *
+     * @param  object $fatura
+     * @param  string $mensagem
+     * @param  bool   $definitivo
+     * @param  int    $idUser
+     * @return array
+     */
+    private function falharNota($fatura, $mensagem, $definitivo, $idUser)
+    {
+        $tentativas = (int) $fatura->nf_attempts + 1;
+
+        // Esgotar o teto também vira definitivo: sem isso a fatura ficaria
+        // girando na fila para sempre.
+        $vira = $definitivo || $tentativas >= self::NF_MAX_TENTATIVAS;
+
+        $this->global_model->edit('crm_invoices', [
+            'nf_status' => $vira ? self::NF_FALHA : (string) $fatura->nf_status,
+            'nf_attempts' => $tentativas,
+            'nf_last_error' => mb_substr((string) $mensagem, 0, 255),
+            'modified' => date('Y-m-d H:i:s'),
+            'modified_by' => (int) $idUser,
+        ], 'id', (int) $fatura->id);
+
+        $this->logarErroServico((int) $fatura->id_company, 'emitirNota fatura=' . (int) $fatura->id, (string) $mensagem);
+
+        return $this->respostaNf(FALSE, $mensagem, ['definitivo' => $vira, 'tentativas' => $tentativas]);
+    }
+
+    /**
+     * Erro do ERP que não melhora com repetição.
+     *
+     * 429 e 5xx são temporários (limite ou indisponibilidade); os demais 4xx
+     * são recusa de conteúdo — dado inválido continua inválido na próxima.
+     *
+     * @param  array $resultado
+     * @return bool
+     */
+    private function nfDefinitivo(array $resultado)
+    {
+        $status = (int) ($resultado['http_code'] ?? 0);
+
+        if ($status === 429 || $status >= 500) return FALSE;
+        if ($status === 0) return FALSE; // rede
+
+        return ($status >= 400);
+    }
+
+    /**
+     * @param  bool   $success
+     * @param  string $message
+     * @param  array  $data
+     * @return array
+     */
+    private function respostaNf($success, $message, array $data = [])
+    {
+        return ['success' => (bool) $success, 'message' => (string) $message, 'data' => $data];
+    }
+
 }

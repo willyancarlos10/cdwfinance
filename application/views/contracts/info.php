@@ -271,7 +271,7 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
               </div>
               <div class="col-12 col-md-3 bloco-cdw">
                 <div class="form-group mb-3">
-                  <label class="form-label">* Cobrança por (PSP)</label>
+                  <label class="form-label">* Banco</label>
                   <?php if (empty($psp_disponiveis)) { ?>
                     <select class="form-control" disabled>
                       <option>Nenhum provedor ativo</option>

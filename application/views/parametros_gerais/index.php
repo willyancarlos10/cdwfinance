@@ -328,42 +328,159 @@ if ($this->input->post('rdap') !== null) {
                   <input type="number" class="form-control" id="reajuste_dias_aviso" name="faturamento[reajuste_dias_aviso]" min="1" max="180" value="<?php echo htmlspecialchars($fat('reajuste_dias_aviso'), ENT_QUOTES, 'UTF-8'); ?>">
                   <small class="text-muted">O e-mail sai antes da data do reajuste.</small>
                 </div>
-
-                <div class="col-12">
-                  <hr class="my-2">
-                  <h5 class="mb-1">Aviso de reajuste ao cliente</h5>
-                  <p class="text-muted mb-0"><small>Mensagem enviada por e-mail antes de o reajuste passar a valer.</small></p>
-                </div>
-
-                <div class="col-12">
-                  <label class="form-label" for="reajuste_email_assunto">* Assunto</label>
-                  <input type="text" class="form-control" id="reajuste_email_assunto" name="faturamento[reajuste_email_assunto]" maxlength="200" value="<?php echo htmlspecialchars($fat('reajuste_email_assunto'), ENT_QUOTES, 'UTF-8'); ?>">
-                </div>
-
-                <div class="col-12">
-                  <label class="form-label" for="reajuste_email_corpo">* Corpo do e-mail</label>
-                  <textarea class="form-control" id="reajuste_email_corpo" name="faturamento[reajuste_email_corpo]" rows="10"><?php echo htmlspecialchars($fat('reajuste_email_corpo'), ENT_QUOTES, 'UTF-8'); ?></textarea>
-                  <small class="text-muted">Texto simples: as quebras de linha são preservadas no e-mail. Abaixo do texto, o sistema acrescenta automaticamente um quadro com índice, percentual, valores e a data.</small>
-                </div>
-
-
-
-                <div class="alert-message">
-                  <h4 class="alert-heading">Marcadores disponíveis</h4>
-                  <hr>
-                  <p class="mb-2">Escreva o marcador no texto e ele será trocado pelo dado do contrato no momento do envio.</p>
-                  <div class="row">
-                    <?php foreach ($reajuste_marcadores as $marcador => $descricao) { ?>
-                      <div class="col-md-6 mb-1">
-                        <code><?php echo htmlspecialchars($marcador, ENT_QUOTES, 'UTF-8'); ?></code>
-                        <small class="text-muted"> — <?php echo htmlspecialchars($descricao, ENT_QUOTES, 'UTF-8'); ?></small>
-                      </div>
-                    <?php } ?>
-                  </div>
-                  <p class="mb-0 mt-2"><small>Marcador digitado errado aparece literalmente no e-mail, em vez de sumir — assim o erro fica visível e pode ser corrigido.</small></p>
-                </div>
               </div>
 
+              <hr class="my-4">
+
+              <?php // Abas internas: os dois avisos têm assunto, corpo e marcadores
+              // próprios, e empilhados na vertical um escondia o outro. Ids
+              // com prefixo `fat_` para não colidirem com as abas de fora,
+              // que vivem na mesma página. 
+              ?>
+              <ul class="nav nav-pills" role="tablist">
+                <li class="nav-item">
+                  <a class="nav-link active" href="#fat_aviso_faturamento" data-bs-toggle="tab" role="tab" aria-selected="true">
+                    Aviso faturamento
+                  </a>
+                </li>
+                <li class="nav-item">
+                  <a class="nav-link" href="#fat_aviso_nota" data-bs-toggle="tab" role="tab" aria-selected="false">
+                    Aviso Nota Fiscal
+                  </a>
+                </li>
+                <li class="nav-item">
+                  <a class="nav-link" href="#fat_aviso_reajuste" data-bs-toggle="tab" role="tab" aria-selected="false">
+                    Aviso Reajuste
+                  </a>
+                </li>
+              </ul>
+
+              <div class="tab-content p-0 pt-3" style="box-shadow: none;">
+
+                <?php // ---------- Aviso de faturamento ---------- 
+                ?>
+                <div class="tab-pane active" id="fat_aviso_faturamento" role="tabpanel">
+
+                  <div class="row g-3">
+                    <div class="col-12">
+                      <label class="form-label" for="fatura_email_assunto">* Assunto</label>
+                      <input type="text" class="form-control" id="fatura_email_assunto" name="faturamento[fatura_email_assunto]" maxlength="200" value="<?php echo htmlspecialchars($fat('fatura_email_assunto'), ENT_QUOTES, 'UTF-8'); ?>">
+                    </div>
+
+                    <div class="col-12">
+                      <label class="form-label" for="fatura_email_corpo">* Corpo do e-mail</label>
+                      <?php // `wysiwyg` é o seletor do editor (TinyMCE, escolhido no
+                      // MY_Controller para o painel inteiro). O conteúdo é HTML, e o
+                      // escape na saída é obrigatório — sem ele, o próprio valor
+                      // gravado fecharia o textarea. 
+                      ?>
+                      <textarea class="form-control wysiwyg" id="fatura_email_corpo" name="faturamento[fatura_email_corpo]" rows="12"><?php echo htmlspecialchars($fat('fatura_email_corpo'), ENT_QUOTES, 'UTF-8'); ?></textarea>
+                      <small class="text-muted">Formatação livre (negrito, listas, links). O boleto vai em anexo.</small>
+                    </div>
+
+                    <div class="col-12">
+                      <div class="alert alert-secondary mb-0" role="alert">
+                        <div class="alert-message">
+                          <h4 class="alert-heading">Marcadores disponíveis</h4>
+                          <hr>
+                          <p class="mb-2">Escreva o marcador no texto e ele será trocado pelo dado da fatura no momento do envio.</p>
+                          <div class="row">
+                            <?php foreach ($fatura_marcadores as $marcador => $descricao) { ?>
+                              <div class="col-md-6 mb-1">
+                                <code><?php echo htmlspecialchars($marcador, ENT_QUOTES, 'UTF-8'); ?></code>
+                                <small class="text-muted"> — <?php echo htmlspecialchars($descricao, ENT_QUOTES, 'UTF-8'); ?></small>
+                              </div>
+                            <?php } ?>
+                          </div>
+                          <p class="mb-0 mt-2"><small>Marcador digitado errado aparece literalmente no e-mail, em vez de sumir — assim o erro fica visível e pode ser corrigido.</small></p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <?php // ---------- Aviso de reajuste ---------- 
+                ?>
+                <div class="tab-pane" id="fat_aviso_nota" role="tabpanel">
+                  <p class="text-muted"><small>
+                    Mensagem que leva a nota fiscal ao cliente. Vale <strong>só para contratos que emitem a NF depois da compensação</strong> —
+                    em "Emitir junto com o boleto" a nota vai anexada no próprio e-mail da cobrança, e este texto não é usado.
+                  </small></p>
+
+                  <div class="row g-3">
+                    <div class="col-12">
+                      <label class="form-label" for="nota_email_assunto">* Assunto</label>
+                      <input type="text" class="form-control" id="nota_email_assunto" name="faturamento[nota_email_assunto]" maxlength="200" value="<?php echo htmlspecialchars($fat('nota_email_assunto'), ENT_QUOTES, 'UTF-8'); ?>">
+                    </div>
+
+                    <div class="col-12">
+                      <label class="form-label" for="nota_email_corpo">* Corpo do e-mail</label>
+                      <textarea class="form-control wysiwyg" id="nota_email_corpo" name="faturamento[nota_email_corpo]" rows="10"><?php echo htmlspecialchars($fat('nota_email_corpo'), ENT_QUOTES, 'UTF-8'); ?></textarea>
+                      <small class="text-muted">Formatação livre. O PDF e o XML vão em anexo; se o download do ERP falhar, entram como link no corpo — receber por link é entrega degradada, mas é entrega.</small>
+                    </div>
+
+                    <div class="col-12">
+                      <div class="alert alert-secondary mb-0" role="alert">
+                        <div class="alert-message">
+                          <h4 class="alert-heading">Marcadores disponíveis</h4>
+                          <hr>
+                          <p class="mb-2">Os mesmos do aviso de faturamento; os que não fizerem sentido aqui saem vazios.</p>
+                          <div class="row">
+                            <?php foreach ($fatura_marcadores as $marcador => $descricao) { ?>
+                              <div class="col-md-6 mb-1">
+                                <code><?php echo htmlspecialchars($marcador, ENT_QUOTES, 'UTF-8'); ?></code>
+                                <small class="text-muted"> — <?php echo htmlspecialchars($descricao, ENT_QUOTES, 'UTF-8'); ?></small>
+                              </div>
+                            <?php } ?>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <?php // ---------- Aviso de reajuste ---------- ?>
+                <div class="tab-pane" id="fat_aviso_reajuste" role="tabpanel">
+                
+                  <div class="row g-3">
+                    <div class="col-12">
+                      <label class="form-label" for="reajuste_email_assunto">* Assunto</label>
+                      <input type="text" class="form-control" id="reajuste_email_assunto" name="faturamento[reajuste_email_assunto]" maxlength="200" value="<?php echo htmlspecialchars($fat('reajuste_email_assunto'), ENT_QUOTES, 'UTF-8'); ?>">
+                    </div>
+
+                    <div class="col-12">
+                      <label class="form-label" for="reajuste_email_corpo">* Corpo do e-mail</label>
+                      <?php // Mesmo editor do aviso de faturamento. O template do e-mail de
+                      // reajuste passou a aceitar HTML por causa desta mudança —
+                      // conteúdo antigo, salvo como texto puro, continua saindo com
+                      // as quebras de linha preservadas. 
+                      ?>
+                      <textarea class="form-control wysiwyg" id="reajuste_email_corpo" name="faturamento[reajuste_email_corpo]" rows="10"><?php echo htmlspecialchars($fat('reajuste_email_corpo'), ENT_QUOTES, 'UTF-8'); ?></textarea>
+                      <small class="text-muted">Formatação livre. Abaixo do texto, o sistema acrescenta automaticamente um quadro com índice, percentual, valores e a data.</small>
+                    </div>
+
+                    <div class="col-12">
+                      <div class="alert alert-secondary mb-0" role="alert">
+                        <div class="alert-message">
+                          <h4 class="alert-heading">Marcadores disponíveis</h4>
+                          <hr>
+                          <p class="mb-2">Escreva o marcador no texto e ele será trocado pelo dado do contrato no momento do envio.</p>
+                          <div class="row">
+                            <?php foreach ($reajuste_marcadores as $marcador => $descricao) { ?>
+                              <div class="col-md-6 mb-1">
+                                <code><?php echo htmlspecialchars($marcador, ENT_QUOTES, 'UTF-8'); ?></code>
+                                <small class="text-muted"> — <?php echo htmlspecialchars($descricao, ENT_QUOTES, 'UTF-8'); ?></small>
+                              </div>
+                            <?php } ?>
+                          </div>
+                          <p class="mb-0 mt-2"><small>Marcador digitado errado aparece literalmente no e-mail, em vez de sumir — assim o erro fica visível e pode ser corrigido.</small></p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
 
               <div class="row mt-4">
                 <div class="col-md-4">
@@ -374,7 +491,6 @@ if ($this->input->post('rdap') !== null) {
               </div>
             </form>
           </div>
-
           <?php
           // Mesmo padrão do faturamento: o grupo `monitoramento` só nasce no
           // primeiro salvamento, então o valor cai no default do model enquanto
@@ -393,7 +509,7 @@ if ($this->input->post('rdap') !== null) {
           ?>
           <div class="tab-pane <?php if ($tabsDefault === 'tab_monitoramento') echo 'active'; ?>" id="tab_monitoramento" role="tabpanel">
             <form method="POST" action="<?php echo base_url('parametros_gerais/post_monitoramento'); ?>" class="mt-3">
-              <div class="alert alert-info" role="alert">
+              <div class="alert alert-info p-2" role="alert">
                 A rotina "cron_monitorar_sites" checa, uma vez por dia, os domínios de contrato vigente cujo tipo de serviço esteja marcado como "tem site" em GESTÃO/Tipos de serviços. Ela compara os nameservers e o título da home com a checagem anterior e detecta site fora do ar, página de erro ou suspensão e certificado vencendo.
               </div>
 
@@ -607,5 +723,29 @@ if ($this->input->post('rdap') !== null) {
       '<?php echo base_url('parametros_gerais/json_posttestarninjas'); ?>', 'Consultando a API Ninjas...');
     testarOrigem('#btn_testar_rdap', '#resultado_teste_rdap',
       '<?php echo base_url('parametros_gerais/json_posttestarrdap'); ?>', 'Consultando o RDAP do Registro.br...');
+
+    // --- Editor dentro de aba ----------------------------------------
+    // Os dois corpos de e-mail nascem ESCONDIDOS: a aba Faturamento não é a
+    // padrão da tela, e a aba interna "Aviso Reajuste" também começa fechada.
+    // O TinyMCE calcula a altura da barra de ferramentas na inicialização, e
+    // num container `display:none` essa medida sai zerada — o editor aparece
+    // achatado quando a aba abre.
+    //
+    // Mandar recalcular no `shown.bs.tab` resolve porque aí o container já tem
+    // dimensão real. Vale para as abas de fora e as de dentro, daí o seletor
+    // amplo.
+    $('a[data-bs-toggle="tab"]').on('shown.bs.tab', function() {
+      if (typeof tinymce === 'undefined' || !tinymce.editors) return;
+
+      tinymce.editors.forEach(function(editor) {
+        var container = editor.getContainer();
+        // Só os que estão de fato visíveis agora: mexer num editor ainda
+        // escondido repetiria o mesmo cálculo zerado.
+        if (container && container.offsetParent !== null) {
+          editor.dispatch('ResizeEditor');
+        }
+      });
+    });
+
   });
 </script>

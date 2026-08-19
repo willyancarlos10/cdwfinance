@@ -241,6 +241,7 @@ class Empresas extends MY_Controller
     $this->load->model('bomcontrole_model');
     $this->load->library('secret_crypto');
     $this->data['bomcontrole_key_set'] = $this->bomcontrole_model->hasKey((int) $id);
+    $this->data['bomcontrole_company_id'] = (int) $this->data['result']->bomcontrole_company_id;
     $this->data['crypto_ready'] = $this->secret_crypto->isReady();
 
     // Aba PSP: uma seção por provedor da allowlist, para o PSP novo
@@ -636,6 +637,49 @@ class Empresas extends MY_Controller
     ]);
   }
 
+  public function json_postregistrarwebhook()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $idCompany = (int) $this->input->post('id');
+    $psp = trim((string) $this->input->post('psp'));
+
+    $this->load->model('psp_model');
+    $resultado = $this->psp_model->registrarWebhook($idCompany, $psp);
+
+    echo json_encode([
+      'success' => !empty($resultado['success']),
+      'return' => !empty($resultado['success']),
+      'message' => (string) $resultado['message'],
+      'data' => isset($resultado['data']) ? $resultado['data'] : NULL,
+      'errors' => !empty($resultado['success']) ? [] : ['psp' => (string) $resultado['message']],
+    ]);
+  }
+  /**
+   * Resolve o IdEmpresa do tenant no Bom Controle.
+   *
+   * Leitura pura (`Empresa/Pesquisar`) — não cria nem altera nada no ERP.
+   */
+  public function json_postresolveridempresa()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $idCompany = (int) $this->input->post('id');
+
+    $this->load->model('bomcontrole_model');
+    $resultado = $this->bomcontrole_model->resolverIdEmpresa(
+      $idCompany,
+      (int) $this->session->userdata('user')->id
+    );
+
+    echo json_encode([
+      'success' => !empty($resultado['success']),
+      'return' => !empty($resultado['success']),
+      'message' => (string) $resultado['message'],
+      'data' => isset($resultado['data']) ? $resultado['data'] : NULL,
+      'errors' => !empty($resultado['success']) ? [] : ['bomcontrole' => (string) $resultado['message']],
+    ]);
+  }
   public function post_ativarcadastro()
   {
     $this->data['result'] = $this->global_model->getWhere_off('crm_companies', ["id" => $this->input->post('id')], TRUE);

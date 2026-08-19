@@ -484,13 +484,17 @@ class Adjustment_model extends CI_Model
      */
     public function corpoPadrao()
     {
-        return "Prezado(a) {cliente},\n\n"
-            . "Conforme previsto em contrato, o valor do seu plano será reajustado a partir de {data_reajuste}, "
-            . "com base na variação acumulada do índice {indice} nos últimos 12 meses ({percentual}).\n\n"
-            . "Valor atual: R$ {valor_atual}\n"
-            . "Novo valor: R$ {valor_novo}\n"
-            . "Periodicidade: {ciclo}\n\n"
-            . "Permanecemos à disposição para qualquer esclarecimento.";
+        // HTML desde que o campo passou a ser editado por editor rico: o padrão
+        // precisa sair no mesmo formato que a tela devolve, senão o primeiro
+        // salvamento converteria o texto e o resultado mudaria sem ninguém pedir.
+        return '<p>Prezado(a) {cliente},</p>'
+            . '<p>Conforme previsto em contrato, o valor do seu plano será reajustado a partir de'
+            . ' <strong>{data_reajuste}</strong>, com base na variação acumulada do índice'
+            . ' {indice} nos últimos 12 meses ({percentual}).</p>'
+            . '<p>Valor atual: R$ {valor_atual}<br />'
+            . 'Novo valor: <strong>R$ {valor_novo}</strong><br />'
+            . 'Periodicidade: {ciclo}</p>'
+            . '<p>Permanecemos à disposição para qualquer esclarecimento.</p>';
     }
 
     /**

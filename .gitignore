@@ -50,3 +50,7 @@ application/logs/*
 # O conteúdo é reenviado pela tela da empresa; o .htaccess da pasta é gerado
 # pelo Psp_model.
 application/certs/
+
+# Anexos materializados para a fila de e-mail (boleto em PDF).
+# Descartáveis: o original está em crm_invoices_boletos e se reconstitui.
+application/anexos_email/

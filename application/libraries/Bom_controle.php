@@ -374,6 +374,119 @@ class Bom_controle
      * @param  array|null $corpoJson corpo da requisição; NULL = sem corpo
      * @return array success, message, data, http_code
      */
+    // ------------------------------------------------------------------
+    // Emissão da nota fiscal (etapa E)
+    // ------------------------------------------------------------------
+
+    /**
+     * GET /integracao/Empresa/Pesquisar
+     *
+     * Resolve o `IdEmpresa`, obrigatório em `Venda/CriarVendaProdutoServico`.
+     * Não existe "listar todas": a busca é por CNPJ ou nome fantasia.
+     *
+     * Leitura pura — seguro de exercitar contra a conta real.
+     *
+     * @param  array  $config
+     * @param  string $pesquisa CNPJ (só dígitos) ou nome
+     * @return array data = [['Id', 'Documento', 'Nome', 'Padrao'], ...]
+     */
+    public function pesquisarEmpresas(array $config, $pesquisa = '')
+    {
+        return $this->requisitar($config, '/integracao/Empresa/Pesquisar', [
+            'pesquisa' => (string) $pesquisa,
+        ]);
+    }
+
+    /**
+     * POST /integracao/Venda/CriarVendaProdutoServico
+     *
+     * ⚠️ **ESCRITA IRREVERSÍVEL.** Cria a venda no ERP e, com
+     * `NotaFiscalServico.Emite = true`, dispara a emissão da NFS-e. Nota fiscal
+     * não se apaga: se corrige com carta de correção. Nunca chamar em laço de
+     * retentativa sem antes conferir `bomcontrole_sale_id` — venda já criada
+     * significa nota já emitida.
+     *
+     * Devolve o **Id da Venda como inteiro puro** no corpo, igual ao
+     * `Cliente/Criar` — por isso `data` pode ser escalar, e não array.
+     *
+     * O objeto `FormaPagamento.Boleto` é **omitido de propósito**: o boleto é
+     * do PSP, e informá-lo aqui mandaria uma segunda cobrança ao cliente.
+     *
+     * @param  array $config
+     * @param  array $payload
+     * @return array
+     */
+    public function criarVendaProdutoServico(array $config, array $payload)
+    {
+        return $this->requisitar(
+            $config,
+            '/integracao/Venda/CriarVendaProdutoServico',
+            [],
+            'POST',
+            $payload
+        );
+    }
+
+    /**
+     * GET /integracao/Venda/Obter/{id}
+     *
+     * O `Criar` devolve só o Id da Venda; o Id da FATURA — alvo da baixa — sai
+     * daqui. É por isso que a emissão são três chamadas encadeadas e não cabe
+     * no handler de um webhook.
+     *
+     * @param  array $config
+     * @param  int   $idVenda
+     * @return array
+     */
+    public function obterVenda(array $config, $idVenda)
+    {
+        return $this->requisitar($config, '/integracao/Venda/Obter/' . (int) $idVenda);
+    }
+
+    /**
+     * PUT /integracao/Fatura/EfeturarPagamento/{id}
+     *
+     * ⚠️ O caminho tem **erro de digitação na própria API**: `EfeturarPagamento`,
+     * sem o "a" (`Efet-u-ar`). Escrever o correto devolve 404 — o
+     * `Financeiro/EfetuarPagamento` é outro endpoint. Não "consertar".
+     *
+     * Dá baixa na parcela que o `CriarVendaProdutoServico` gerou no financeiro
+     * do ERP. Sem isso o BC acumula recebíveis fantasmas, um por fatura, já que
+     * o dinheiro entrou pelo PSP e nunca será quitado lá.
+     *
+     * A data de quitação é a **do PSP**, não a de hoje.
+     *
+     * @param  array $config
+     * @param  int   $idFatura
+     * @param  array $payload ValorLiquido, DataQuitacao, DataConciliacao, GerarResiduo
+     * @return array
+     */
+    public function efeturarPagamentoFatura(array $config, $idFatura, array $payload)
+    {
+        return $this->requisitar(
+            $config,
+            '/integracao/Fatura/EfeturarPagamento/' . (int) $idFatura,
+            [],
+            'PUT',
+            $payload
+        );
+    }
+
+    /**
+     * GET /integracao/Fatura/Obter/{id}
+     *
+     * Traz os links do **PDF e do XML** da nota — os dois vão ao cliente na
+     * etapa F.
+     *
+     * @param  array $config
+     * @param  int   $idFatura
+     * @return array
+     */
+    public function obterFatura(array $config, $idFatura)
+    {
+        return $this->requisitar($config, '/integracao/Fatura/Obter/' . (int) $idFatura);
+    }
+
     private function requisitar(array $config, $caminho, array $params = [], $verbo = 'GET', array $corpoJson = NULL)
     {
         $apiKey = trim((string) ($config['api_key'] ?? ''));

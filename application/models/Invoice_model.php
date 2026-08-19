@@ -52,6 +52,39 @@ class Invoice_model extends CI_Model
      */
     const PER_PAGE_ABA = 10;
 
+    /** Teto de e-mails por rodada — a fila entrega, aqui só se enfileira. */
+    const MAX_ENVIOS_POR_RODADA = 200;
+
+    /** Teto do arquivo da nota baixado do ERP. */
+    const MAX_BYTES_NOTA = 10485760;
+
+    /** Onde o PDF é materializado para a fila de e-mail anexar. */
+    const DIR_ANEXOS = 'anexos_email';
+
+    /**
+     * Por quantos dias o anexo materializado fica em disco. A fila entrega em
+     * requisição posterior, então apagar cedo demais manda e-mail sem boleto.
+     */
+    const DIAS_MANTER_ANEXO = 7;
+
+    /** Padrões do aviso da nota fiscal (etapa F). */
+    const ASSUNTO_NOTA_PADRAO = 'Nota fiscal de {competencia}';
+    const CORPO_NOTA_PADRAO = '<p>Olá, {cliente}!</p>'
+        . '<p>Segue a nota fiscal referente a <strong>{competencia}</strong>,'
+        . ' no valor de <strong>{valor}</strong>.</p>'
+        . '<p>Qualquer dúvida, é só responder este e-mail.</p>'
+        . '<p>{empresa}</p>';
+
+    /** Padrões do aviso de faturamento, usados enquanto ninguém configurou. */
+    const ASSUNTO_PADRAO = 'Sua fatura de {competencia} — vencimento em {vencimento}';
+    const CORPO_PADRAO = '<p>Olá, {cliente}!</p>'
+        . '<p>Segue em anexo o boleto da sua fatura de <strong>{competencia}</strong>,'
+        . ' no valor de <strong>{valor}</strong>, com vencimento em <strong>{vencimento}</strong>.</p>'
+        . '<p>Se preferir pagar por PIX, use o código abaixo:</p>'
+        . '<p>{pix_copia_cola}</p>'
+        . '<p>Qualquer dúvida, é só responder este e-mail.</p>'
+        . '<p>{empresa}</p>';
+
     /** Meses que cada ciclo avança. Espelha Contratos::cycles(). */
     private $mesesPorCiclo = [
         'mensal' => 1,
@@ -444,6 +477,13 @@ class Invoice_model extends CI_Model
             $this->db->db_debug = $debugAnterior;
         }
 
+        // `com_boleto` entra na fila da nota JÁ NA GERAÇÃO: a nota precisa
+        // existir antes do envio, porque ela vai no mesmo e-mail do boleto.
+        // O `enfileirarNota` confere a política — chamar aqui para toda fatura
+        // é o que mantém a decisão num lugar só.
+        $this->load->model('bomcontrole_model');
+        $this->bomcontrole_model->enfileirarNota((int) $id, 'geracao');
+
         return ['success' => TRUE, 'message' => '', 'criada' => TRUE];
     }
 
@@ -732,6 +772,609 @@ class Invoice_model extends CI_Model
             'vencida' => 'Vencida',
             'paga' => 'Paga',
             'cancelada' => 'Cancelada',
+        ];
+    }
+
+    // ------------------------------------------------------------------
+    // Envio do aviso ao cliente (etapa B)
+    // ------------------------------------------------------------------
+
+    /**
+     * Faturas prontas para o cliente receber.
+     *
+     * O RECORTE, e o porquê de cada condição:
+     *
+     *  - `status = 'aberta'` — fatura paga ou cancelada não se cobra;
+     *  - `registration = 'registrada'` — sem boleto não há o que anexar, e a
+     *    coluna derivada (migration 035) é a mesma que a fila de cobrança usa,
+     *    então tela, fila e envio concordam sobre o limiar;
+     *  - `sent_at IS NULL` — o carimbo é o que impede o cliente de receber a
+     *    mesma cobrança toda madrugada;
+     *  - **`com_boleto` só com a nota emitida** — ver abaixo.
+     *
+     * SOBRE O `com_boleto`: esse contrato recebe boleto **e nota fiscal no
+     * MESMO e-mail** — requisito de negócio (exigência dos clientes e economia
+     * de disparo no Brevo), não conveniência. Como a emissão da nota é a etapa
+     * E e ainda não existe, essas faturas ficam **represadas**: mandar só o
+     * boleto agora seria exatamente a regressão que o requisito proíbe, e o
+     * cliente não pode receber dois e-mails.
+     *
+     * Com a etapa E no ar, a condição é exatamente essa: **ou não é
+     * `com_boleto`, ou a nota já foi emitida**. Enquanto a nota não sai, a
+     * fatura fica represada — e é isso que garante o e-mail único.
+     *
+     * @param  int $limite
+     * @return array
+     */
+    public function getSendableInvoices($limite = self::MAX_ENVIOS_POR_RODADA)
+    {
+        $limite = max(1, (int) $limite);
+
+        $sql = "SELECT `id`, `id_company`, `id_customer`, `id_contract`, `competence`,
+                       `due_date`, `value`, `description`, `invoice_policy`,
+                       `installment_number`, `installments_total`,
+                       `linha_digitavel`, `link_pix`, `customer_name`, `customer_document`
+                  FROM `crm_invoices_v`
+                 WHERE `status` = 'aberta'
+                   AND `registration` = 'registrada'
+                   AND `sent_at` IS NULL
+                   AND (`invoice_policy` <> 'com_boleto' OR `nf_status` = 'emitida')
+                 ORDER BY `due_date` ASC, `id` ASC
+                 LIMIT " . $limite;
+
+        $consulta = $this->db->query($sql);
+
+        return ($consulta === FALSE) ? [] : $consulta->result();
+    }
+
+    /**
+     * Monta e enfileira o e-mail de uma fatura.
+     *
+     * Enfileira, não envia: `Global_model::send_email()` grava em `crm_cron` e
+     * quem entrega é o `cron_enviar_email`, que já existe. Assim uma falha de
+     * SMTP não derruba a rodada de faturamento, e o espaçamento de entrega é
+     * problema de quem entrega.
+     *
+     * @param  object $fatura linha de crm_invoices_v
+     * @param  int    $idUser
+     * @return array success, message
+     */
+    public function enviarFatura($fatura, $idUser)
+    {
+        $this->load->model('notification_model');
+        $this->load->model('psp_model');
+
+        $contrato = $this->global_model->getWhere_off('crm_contracts', [
+            'id' => (int) $fatura->id_contract,
+        ], TRUE);
+
+        $cliente = $this->global_model->getWhere_off('crm_customers', [
+            'id' => (int) $fatura->id_customer,
+        ], TRUE);
+
+        if (empty($contrato) || empty($cliente)) {
+            return $this->respostaEnvio(FALSE, 'Contrato ou cliente da fatura não encontrado.');
+        }
+
+        $destinos = $this->notification_model->destinatarios($contrato, $cliente);
+
+        // Sem destinatário não é erro de sistema: é cadastro incompleto. A
+        // fatura fica sem `sent_at` e volta na próxima rodada, quando alguém
+        // tiver preenchido o e-mail — em vez de ser marcada como enviada para
+        // ninguém.
+        if (empty($destinos['to'])) {
+            return $this->respostaEnvio(FALSE, 'Cliente sem e-mail para receber a cobrança (nem no contrato, nem no cadastro).');
+        }
+
+        // O boleto é o anexo. Sem ele não há e-mail — o recorte de
+        // getSendableInvoices() já garante que a cobrança está registrada, mas
+        // o PDF pode falhar na primeira busca.
+        $boleto = $this->psp_model->obterBoleto((int) $fatura->id, (int) $fatura->id_company, $idUser);
+        if (empty($boleto['success'])) {
+            return $this->respostaEnvio(FALSE, 'Boleto indisponível: ' . $boleto['message']);
+        }
+
+        $anexo = $this->materializarBoleto((int) $fatura->id, (string) $boleto['data']['content'], $fatura);
+        if ($anexo === FALSE) {
+            return $this->respostaEnvio(FALSE, 'Não foi possível preparar o anexo do boleto.');
+        }
+
+        $marcadores = $this->marcadoresDaFatura($fatura, $cliente);
+
+        $assunto = $this->aplicarMarcadores($this->assuntoConfigurado(), $marcadores);
+        $texto = $this->aplicarMarcadores($this->corpoConfigurado(), $marcadores);
+
+        $corpo = $this->global_model->body_email('emails/billing/invoice', [
+            'title' => $assunto,
+            'mensagem' => $texto,
+            'cliente' => (string) $cliente->name,
+            'competencia' => date('m/Y', strtotime((string) $fatura->competence)),
+            'vencimento' => date('d/m/Y', strtotime((string) $fatura->due_date)),
+            'valor' => reais($fatura->value),
+            'parcela' => $marcadores['{parcela}'],
+            'descricao' => (string) $fatura->description,
+            // Só chegam preenchidos quando o download falhou: aí o link no corpo
+            // é o que garante que o cliente receba a nota de algum jeito.
+            'link_nota_pdf' => $linksNota['pdf'],
+            'link_nota_xml' => $linksNota['xml'],
+        ]);
+
+        $anexos = [$anexo];
+        $linksNota = ['pdf' => '', 'xml' => ''];
+
+        // `com_boleto` leva a NOTA no MESMO e-mail — requisito de negócio
+        // (exigência dos clientes e economia de disparo no Brevo). A fila já
+        // garante que a nota está emitida; aqui ela vira anexo.
+        if ((string) $fatura->invoice_policy === 'com_boleto') {
+            $nota = $this->materializarNota($fatura);
+            $anexos = array_merge($anexos, $nota['anexos']);
+            $linksNota = $nota['links'];
+        }
+
+        $enfileirado = $this->global_model->send_email(
+            $assunto,
+            $corpo,
+            $destinos['to'],
+            $destinos['cc'],
+            $destinos['cco'],
+            NULL,
+            $anexos
+        );
+
+        if (!$enfileirado) {
+            return $this->respostaEnvio(FALSE, 'Falha ao enfileirar o e-mail.');
+        }
+
+        $this->global_model->edit('crm_invoices', [
+            'sent_at' => date('Y-m-d H:i:s'),
+            'modified' => date('Y-m-d H:i:s'),
+            'modified_by' => (int) $idUser,
+        ], 'id', (int) $fatura->id);
+
+        return $this->respostaEnvio(TRUE, 'Enviado para ' . implode(', ', $destinos['to']) . '.');
+    }
+
+    /**
+     * Grava o PDF num arquivo para o anexo da fila de e-mail.
+     *
+     * A fila (`cron_enviar_email`) anexa por CAMINHO DE ARQUIVO, e o boleto
+     * vive no banco — então ele precisa existir em disco no momento da entrega,
+     * que acontece numa requisição posterior.
+     *
+     * Fica sob `application/`, que o `.htaccess` do CI já nega por inteiro:
+     * o PDF traz nome, documento, endereço e valor do cliente, e em `images/`
+     * (servida pelo Apache) ficaria acessível por URL. É a mesma regra dos
+     * certificados do PSP.
+     *
+     * O arquivo é DESCARTÁVEL — o original está no banco e se reconstitui a
+     * qualquer momento —, então a limpeza é por idade, feita na própria rodada.
+     *
+     * @param  int    $idInvoice
+     * @param  string $base64
+     * @param  object $fatura
+     * @return array|bool ['path', 'name'] ou FALSE
+     */
+    private function materializarBoleto($idInvoice, $base64, $fatura)
+    {
+        $diretorio = APPPATH . self::DIR_ANEXOS;
+
+        if (!is_dir($diretorio) && !@mkdir($diretorio, 0700, TRUE)) {
+            return FALSE;
+        }
+
+        // Defesa em profundidade, no mesmo padrão dos certificados do PSP: o
+        // .htaccess de `application/` já nega tudo, e este cobre o caso de a
+        // pasta ser copiada para outro lugar.
+        $htaccess = $diretorio . '/.htaccess';
+        if (!file_exists($htaccess)) {
+            @file_put_contents(
+                $htaccess,
+                "<IfModule authz_core_module>\n    Require all denied\n</IfModule>\n"
+                . "<IfModule !authz_core_module>\n    Deny from all\n</IfModule>\n"
+            );
+        }
+
+        $bytes = base64_decode($base64, TRUE);
+        if ($bytes === FALSE || $bytes === '') return FALSE;
+
+        $caminho = $diretorio . '/boleto-' . (int) $idInvoice . '.pdf';
+
+        if (@file_put_contents($caminho, $bytes) === FALSE) return FALSE;
+        @chmod($caminho, 0600);
+
+        // O nome que o cliente vê no e-mail: competência em vez do id interno,
+        // que não diz nada na caixa de entrada dele.
+        return [
+            'path' => $caminho,
+            'name' => 'boleto-' . date('m-Y', strtotime((string) $fatura->competence)) . '.pdf',
+        ];
+    }
+
+    /**
+     * Baixa o PDF e o XML da nota e os deixa prontos para anexar.
+     *
+     * O ERP publica a nota como URL, não como base64 — o oposto do boleto. Mas
+     * a fila de e-mail anexa por CAMINHO, então o arquivo precisa existir em
+     * disco no momento da entrega, que acontece numa requisição posterior.
+     *
+     * **Falha aqui NÃO impede o e-mail.** Quem não conseguiu baixar recebe o
+     * LINK no corpo, e a mensagem sai assim mesmo: o cliente receber a nota por
+     * link é entrega degradada, mas é entrega — e o alternativo seria a fatura
+     * girar na fila para sempre se o link exigir autenticação, coisa que só se
+     * descobre com uma nota real na mão.
+     *
+     * @param  object $fatura
+     * @return array ['anexos' => [], 'links' => ['pdf' => '', 'xml' => '']]
+     */
+    private function materializarNota($fatura)
+    {
+        $saida = ['anexos' => [], 'links' => ['pdf' => '', 'xml' => '']];
+
+        $arquivos = [
+            'pdf' => ['url' => trim((string) $fatura->link_nota_fiscal), 'ext' => 'pdf'],
+            'xml' => ['url' => trim((string) $fatura->link_nota_fiscal_xml), 'ext' => 'xml'],
+        ];
+
+        $diretorio = APPPATH . self::DIR_ANEXOS;
+        if (!is_dir($diretorio) && !@mkdir($diretorio, 0700, TRUE)) {
+            // Sem pasta, ao menos os links seguem para o corpo.
+            foreach ($arquivos as $tipo => $a) $saida['links'][$tipo] = $a['url'];
+            return $saida;
+        }
+
+        $competencia = date('m-Y', strtotime((string) $fatura->competence));
+
+        foreach ($arquivos as $tipo => $a) {
+            if ($a['url'] === '' || stripos($a['url'], 'http') !== 0) continue;
+
+            $conteudo = $this->baixarArquivo($a['url']);
+
+            if ($conteudo === FALSE) {
+                $saida['links'][$tipo] = $a['url'];
+                log_message('error', sprintf(
+                    '[BOMCONTROLE] Nota fiscal — fatura=%d: nao foi possivel baixar o %s de %s; o link vai no corpo do e-mail.',
+                    (int) $fatura->id,
+                    strtoupper($tipo),
+                    $a['url']
+                ));
+                continue;
+            }
+
+            $caminho = $diretorio . '/nota-' . (int) $fatura->id . '.' . $a['ext'];
+
+            if (@file_put_contents($caminho, $conteudo) === FALSE) {
+                $saida['links'][$tipo] = $a['url'];
+                continue;
+            }
+
+            @chmod($caminho, 0600);
+
+            $saida['anexos'][] = [
+                'path' => $caminho,
+                'name' => 'nota-fiscal-' . $competencia . '.' . $a['ext'],
+            ];
+        }
+
+        return $saida;
+    }
+
+    /**
+     * GET simples com teto de tamanho e tempo.
+     *
+     * `FOLLOWLOCATION` ligado porque o ERP costuma redirecionar para um
+     * armazenamento; `PROTOCOLS` restrito a HTTP/HTTPS porque estamos seguindo
+     * um endereço de terceiro a partir do servidor — sem a trava, um
+     * `Location: file:///…` seria seguido (a mesma regra do monitoramento de
+     * sites).
+     *
+     * @param  string $url
+     * @return string|bool
+     */
+    private function baixarArquivo($url)
+    {
+        $ch = curl_init($url);
+
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => TRUE,
+            CURLOPT_FOLLOWLOCATION => TRUE,
+            CURLOPT_MAXREDIRS => 3,
+            CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_TIMEOUT => 30,
+            CURLOPT_SSL_VERIFYPEER => TRUE,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+            CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+        ]);
+
+        $corpo = curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $erro = curl_errno($ch);
+        curl_close($ch);
+
+        if ($erro !== 0 || $status < 200 || $status > 299) return FALSE;
+        if (!is_string($corpo) || $corpo === '') return FALSE;
+        if (strlen($corpo) > self::MAX_BYTES_NOTA) return FALSE;
+
+        return $corpo;
+    }
+    /**
+     * Apaga os anexos já entregues (por idade).
+     *
+     * Roda no começo da rodada, e não depois de cada envio: a fila de e-mail
+     * entrega em requisição posterior, então apagar logo após enfileirar
+     * mandaria um e-mail sem anexo.
+     *
+     * @return int quantos arquivos saíram
+     */
+    public function limparAnexosAntigos()
+    {
+        $diretorio = APPPATH . self::DIR_ANEXOS;
+        if (!is_dir($diretorio)) return 0;
+
+        $limite = time() - (self::DIAS_MANTER_ANEXO * 86400);
+        $removidos = 0;
+
+        $padroes = [$diretorio . '/boleto-*.pdf', $diretorio . '/nota-*.pdf', $diretorio . '/nota-*.xml'];
+        $arquivos = [];
+        foreach ($padroes as $padrao) $arquivos = array_merge($arquivos, (array) glob($padrao));
+
+        foreach ($arquivos as $arquivo) {
+            if (@filemtime($arquivo) < $limite && @unlink($arquivo)) $removidos++;
+        }
+
+        return $removidos;
+    }
+
+    /**
+     * Valores dos marcadores desta fatura.
+     *
+     * @param  object $fatura
+     * @param  object $cliente
+     * @return array
+     */
+    private function marcadoresDaFatura($fatura, $cliente)
+    {
+        $empresa = $this->global_model->getFieldsWhereSingle_off(
+            'crm_companies',
+            'byname, name',
+            ['id' => (int) $fatura->id_company],
+            TRUE
+        );
+
+        $total = max(1, (int) $fatura->installments_total);
+
+        return [
+            '{cliente}' => (string) $cliente->name,
+            '{documento}' => cnpj((string) $cliente->document),
+            '{competencia}' => date('m/Y', strtotime((string) $fatura->competence)),
+            '{vencimento}' => date('d/m/Y', strtotime((string) $fatura->due_date)),
+            '{valor}' => 'R$ ' . reais($fatura->value),
+            // Parcela única vira vazio, e não "1/1": repetir isso em toda
+            // cobrança mensal é ruído que esconde as poucas de fato parceladas.
+            '{parcela}' => ($total > 1) ? ((int) $fatura->installment_number . '/' . $total) : '',
+            '{descricao}' => (string) $fatura->description,
+            '{linha_digitavel}' => (string) $fatura->linha_digitavel,
+            '{pix_copia_cola}' => (string) $fatura->link_pix,
+            '{empresa}' => (string) (empty($empresa) ? '' : ($empresa->byname ?: $empresa->name)),
+        ];
+    }
+
+    /**
+     * Marcador desconhecido fica LITERAL, como no aviso de reajuste: erro
+     * visível se corrige, trecho que some não.
+     *
+     * @param  string $texto
+     * @param  array  $marcadores
+     * @return string
+     */
+    public function aplicarMarcadores($texto, array $marcadores)
+    {
+        return str_replace(array_keys($marcadores), array_values($marcadores), (string) $texto);
+    }
+
+    /**
+     * @param  bool   $success
+     * @param  string $message
+     * @return array
+     */
+    private function respostaEnvio($success, $message)
+    {
+        return ['success' => (bool) $success, 'message' => (string) $message];
+    }
+
+    // ------------------------------------------------------------------
+    // Envio da nota fiscal (etapa F)
+    // ------------------------------------------------------------------
+
+    /**
+     * Notas prontas para ir ao cliente.
+     *
+     * **Só `pos_compensacao`.** No `com_boleto` a nota já foi junto do boleto,
+     * no e-mail da etapa B — mandá-la de novo aqui seria o segundo disparo que
+     * o requisito proíbe. Em `nao_emitir` não há nota.
+     *
+     * @param  int $limite
+     * @return array
+     */
+    public function getSendableNotas($limite = self::MAX_ENVIOS_POR_RODADA)
+    {
+        $limite = max(1, (int) $limite);
+
+        $sql = "SELECT `id`, `id_company`, `id_customer`, `id_contract`, `competence`,
+                       `due_date`, `value`, `description`, `invoice_policy`,
+                       `installment_number`, `installments_total`,
+                       `link_nota_fiscal`, `link_nota_fiscal_xml`,
+                       `nf_issued_at`, `customer_name`, `customer_document`
+                  FROM `crm_invoices_v`
+                 WHERE `nf_status` = 'emitida'
+                   AND `invoice_policy` = 'pos_compensacao'
+                   AND `nf_sent_at` IS NULL
+                 ORDER BY `nf_issued_at` ASC, `id` ASC
+                 LIMIT " . $limite;
+
+        $consulta = $this->db->query($sql);
+
+        return ($consulta === FALSE) ? [] : $consulta->result();
+    }
+
+    /**
+     * Monta e enfileira o e-mail da nota fiscal.
+     *
+     * @param  object $fatura
+     * @param  int    $idUser
+     * @return array success, message
+     */
+    public function enviarNota($fatura, $idUser)
+    {
+        $this->load->model('notification_model');
+
+        $contrato = $this->global_model->getWhere_off('crm_contracts', ['id' => (int) $fatura->id_contract], TRUE);
+        $cliente = $this->global_model->getWhere_off('crm_customers', ['id' => (int) $fatura->id_customer], TRUE);
+
+        if (empty($contrato) || empty($cliente)) {
+            return $this->respostaEnvio(FALSE, 'Contrato ou cliente da fatura não encontrado.');
+        }
+
+        $destinos = $this->notification_model->destinatarios($contrato, $cliente);
+
+        if (empty($destinos['to'])) {
+            return $this->respostaEnvio(FALSE, 'Cliente sem e-mail para receber a nota.');
+        }
+
+        $nota = $this->materializarNota($fatura);
+
+        // Sem anexo E sem link não há o que entregar: a nota está marcada como
+        // emitida mas o ERP não devolveu onde ela está. Fica sem `nf_sent_at`
+        // e volta na próxima rodada.
+        if (empty($nota['anexos']) && $nota['links']['pdf'] === '' && $nota['links']['xml'] === '') {
+            return $this->respostaEnvio(FALSE, 'A nota está emitida mas o ERP não devolveu o PDF nem o XML.');
+        }
+
+        $marcadores = $this->marcadoresDaFatura($fatura, $cliente);
+
+        $assunto = $this->aplicarMarcadores($this->assuntoNotaConfigurado(), $marcadores);
+        $texto = $this->aplicarMarcadores($this->corpoNotaConfigurado(), $marcadores);
+
+        $corpo = $this->global_model->body_email('emails/billing/nota_fiscal', [
+            'title' => $assunto,
+            'mensagem' => $texto,
+            'cliente' => (string) $cliente->name,
+            'competencia' => date('m/Y', strtotime((string) $fatura->competence)),
+            'valor' => reais($fatura->value),
+            'emitida_em' => !empty($fatura->nf_issued_at) ? date('d/m/Y', strtotime((string) $fatura->nf_issued_at)) : '',
+            'link_nota_pdf' => $nota['links']['pdf'],
+            'link_nota_xml' => $nota['links']['xml'],
+            'tem_anexo' => !empty($nota['anexos']),
+        ]);
+
+        $enfileirado = $this->global_model->send_email(
+            $assunto,
+            $corpo,
+            $destinos['to'],
+            $destinos['cc'],
+            $destinos['cco'],
+            NULL,
+            $nota['anexos']
+        );
+
+        if (!$enfileirado) {
+            return $this->respostaEnvio(FALSE, 'Falha ao enfileirar o e-mail.');
+        }
+
+        $this->global_model->edit('crm_invoices', [
+            'nf_sent_at' => date('Y-m-d H:i:s'),
+            'modified' => date('Y-m-d H:i:s'),
+            'modified_by' => (int) $idUser,
+        ], 'id', (int) $fatura->id);
+
+        return $this->respostaEnvio(TRUE, 'Nota enviada para ' . implode(', ', $destinos['to']) . '.');
+    }
+
+    /**
+     * Assunto configurado do e-mail da nota fiscal.
+     *
+     * @return string
+     */
+    public function assuntoNotaConfigurado()
+    {
+        $valor = trim((string) $this->general_settings_model->getGroupValue('faturamento', 'nota_email_assunto', ''));
+
+        return ($valor !== '') ? $valor : self::ASSUNTO_NOTA_PADRAO;
+    }
+
+    /**
+     * Corpo configurado do e-mail da nota fiscal (HTML, editor na tela).
+     *
+     * @return string
+     */
+    public function corpoNotaConfigurado()
+    {
+        $valor = trim((string) $this->general_settings_model->getGroupValue('faturamento', 'nota_email_corpo', ''));
+
+        return ($valor !== '') ? $valor : self::CORPO_NOTA_PADRAO;
+    }
+    // ------------------------------------------------------------------
+    // Aviso de faturamento ao cliente (etapa B)
+    // ------------------------------------------------------------------
+
+    /**
+     * Assunto configurado do e-mail que leva o boleto.
+     *
+     * Mesmo desenho do Adjustment_model: o valor vem dos Parâmetros gerais e
+     * cai no padrão enquanto ninguém salvou — a tela nunca abre vazia, e o
+     * envio nunca sai sem assunto.
+     *
+     * @return string
+     */
+    public function assuntoConfigurado()
+    {
+        $valor = trim((string) $this->general_settings_model->getGroupValue('faturamento', 'fatura_email_assunto', ''));
+
+        return ($valor !== '') ? $valor : self::ASSUNTO_PADRAO;
+    }
+
+    /**
+     * Corpo configurado do e-mail que leva o boleto.
+     *
+     * Diferente do aviso de reajuste, este campo é **HTML** (editor Froala na
+     * tela): o boleto vai anexo e o texto costuma pedir destaque para valor e
+     * vencimento. Guardar HTML significa que quem consumir precisa enviar como
+     * `mailtype = 'html'` — texto puro sairia com as tags à mostra.
+     *
+     * @return string
+     */
+    public function corpoConfigurado()
+    {
+        $valor = trim((string) $this->general_settings_model->getGroupValue('faturamento', 'fatura_email_corpo', ''));
+
+        return ($valor !== '') ? $valor : self::CORPO_PADRAO;
+    }
+
+    /**
+     * Marcadores aceitos no assunto e no corpo.
+     *
+     * Ficam aqui, e não na view, porque quem troca marcador por valor é o
+     * envio — e é este mesmo mapa que a etapa B vai percorrer. Duas listas (uma
+     * para a tela, outra para o envio) divergiriam no primeiro marcador novo.
+     *
+     * **Marcador desconhecido fica literal**, como no aviso de reajuste: erro
+     * visível se corrige; trecho que some, não.
+     *
+     * @return array marcador => descrição
+     */
+    public function marcadoresDisponiveis()
+    {
+        return [
+            '{cliente}' => 'Nome do cliente',
+            '{documento}' => 'CPF/CNPJ do cliente',
+            '{competencia}' => 'Mês de competência (mm/aaaa)',
+            '{vencimento}' => 'Data de vencimento (dd/mm/aaaa)',
+            '{valor}' => 'Valor da fatura',
+            '{parcela}' => 'Parcela (ex.: 2/4); vazio quando é parcela única',
+            '{descricao}' => 'Descrição congelada na fatura',
+            '{linha_digitavel}' => 'Linha digitável do boleto',
+            '{pix_copia_cola}' => 'PIX copia e cola',
+            '{empresa}' => 'Nome da empresa que está cobrando',
         ];
     }
 

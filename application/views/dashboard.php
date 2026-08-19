@@ -585,7 +585,7 @@ foreach ($ind_cancelamentos['motivos'] as $m) {
                                     </button>
                                 </div>
                                 <?php if (!empty($bloco['nota_cdw'])) { ?>
-                                    <small class="text-muted d-none mt-1" data-dom-nota="<?php echo $chave; ?>"><?php echo $bloco['nota_cdw']; ?></small>
+                                    <!-- <small class="text-muted d-none mt-1" data-dom-nota="<?php echo $chave; ?>"><?php echo $bloco['nota_cdw']; ?></small> -->
                                 <?php } ?>
                             </div>
                         <?php } ?>

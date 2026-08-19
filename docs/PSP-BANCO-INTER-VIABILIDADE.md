@@ -102,6 +102,14 @@ existe rota".
 | **`GET .../pdf` devolve base64 dentro de JSON** (chave `pdf`) | confirmado: decodifica em PDF válido de ~69 KB (assinatura `%PDF-`). Não há URL pública do boleto |
 | **`seuNumero` volta na listagem**, em 19/19 itens | é o que permite **adotar** uma cobrança órfã depois de um POST ambíguo, sem depender do `psp_charge_id` perdido |
 
+> ⚠️ **O SANDBOX DO INTER SÓ ATENDE DAS 08:00 ÀS 20:00.** Fora dessa janela as chamadas falham com
+> timeout ou HTTP 500 — que é indistinguível de instabilidade real, e foi o que atrapalhou vários
+> testes desta implementação. **Antes de investigar uma falha do sandbox, confira a hora.**
+> (Nem toda falha foi isso: os 500 registrados no log às 16:23–16:32 estavam dentro da janela e
+> foram instabilidade de verdade — o retry em GET existe por causa deles.)
+>
+> A produção não tem essa restrição.
+
 > A armadilha do 406 custa caro no diagnóstico: a mensagem que volta é a genérica
 > *"verifique se os dados informados estão de acordo com a documentação"*, que aponta para o
 > **payload** — e não para o cabeçalho, que é onde o problema está. Foram seis valores de

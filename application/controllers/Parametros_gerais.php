@@ -329,12 +329,45 @@ class Parametros_gerais extends MY_Controller
       redirect(base_url('parametros_gerais?tab=tab_faturamento'));
     }
 
+    // O corpo do aviso de faturamento vem do Froala, então é HTML.
+    //
+    // O `global_xss_filtering` do projeto está DESLIGADO hoje, então o POST já
+    // chega cru e este FALSE não muda nada agora. Ele está aqui para o dia em
+    // que alguém ligar o filtro: o xss_clean do CI3 reescreve atributos e
+    // quebra a marcação em silêncio, e o estrago só apareceria no e-mail já
+    // enviado ao cliente. Mesmo cuidado do `post('secret', FALSE)` das
+    // credenciais.
+    $faturamentoCru = $this->input->post('faturamento', FALSE);
+    if (!is_array($faturamentoCru)) {
+      $faturamentoCru = [];
+    }
+
+    $assuntoFatura = trim((string) ($faturamentoCru['fatura_email_assunto'] ?? ''));
+    $corpoFatura = trim((string) ($faturamentoCru['fatura_email_corpo'] ?? ''));
+
+    if ($assuntoFatura === '' || $corpoFatura === '') {
+      $this->session->set_flashdata('warning', 'Informe o assunto e o corpo do e-mail de faturamento.');
+      redirect(base_url('parametros_gerais?tab=tab_faturamento'));
+    }
+
+    $assuntoNota = trim((string) ($faturamentoCru['nota_email_assunto'] ?? ''));
+    $corpoNota = trim((string) ($faturamentoCru['nota_email_corpo'] ?? ''));
+
+    if ($assuntoNota === '' || $corpoNota === '') {
+      $this->session->set_flashdata('warning', 'Informe o assunto e o corpo do e-mail da nota fiscal.');
+      redirect(base_url('parametros_gerais?tab=tab_faturamento'));
+    }
+
     $this->general_settings_model->saveGroup('faturamento', [
       'faturamento_dias_antecedencia' => (string) $antecedencia,
       'faturamento_dia_padrao' => (string) $diaPadrao,
       'reajuste_dias_aviso' => (string) $diasAviso,
       'reajuste_email_assunto' => mb_substr($assunto, 0, 200),
       'reajuste_email_corpo' => $corpo,
+      'fatura_email_assunto' => mb_substr($assuntoFatura, 0, 200),
+      'fatura_email_corpo' => $corpoFatura,
+      'nota_email_assunto' => mb_substr($assuntoNota, 0, 200),
+      'nota_email_corpo' => $corpoNota,
     ], (int) $this->session->userdata('user')->id);
 
     $this->session->set_flashdata('success', 'Parâmetros de faturamento salvos.');
@@ -435,8 +468,14 @@ class Parametros_gerais extends MY_Controller
       'reajuste_dias_aviso' => $this->adjustment_model->diasAviso(),
       'reajuste_email_assunto' => $this->adjustment_model->assuntoConfigurado(),
       'reajuste_email_corpo' => $this->adjustment_model->corpoConfigurado(),
+      'fatura_email_assunto' => $this->invoice_model->assuntoConfigurado(),
+      'fatura_email_corpo' => $this->invoice_model->corpoConfigurado(),
+      'nota_email_assunto' => $this->invoice_model->assuntoNotaConfigurado(),
+      'nota_email_corpo' => $this->invoice_model->corpoNotaConfigurado(),
     ];
     $this->data['reajuste_marcadores'] = $this->adjustment_model->marcadoresDisponiveis();
+    $this->data['fatura_marcadores'] = $this->invoice_model->marcadoresDisponiveis();
+
 
     // Monitoramento: mesmo padrão — os defaults vêm do model.
     $this->load->model('site_monitor_model');

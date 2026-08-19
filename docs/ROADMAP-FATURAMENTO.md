@@ -1,7 +1,7 @@
 # Faturamento — próximas etapas
 
-Situação em **18/08/2026**, depois da **etapa A** — a cobrança no PSP (migrations **034**, **035** e
-**036**).
+Situação em **19/08/2026**, com as etapas **A a F** implementadas (migrations **034** a **040**) e as
+etapas **G** (descartada) e **H** (operação) decididas.
 
 ## O que já está pronto
 
@@ -13,15 +13,24 @@ default é `bomcontrole` — a base inteira continua sendo cobrada pelo ERP até
 contrato. Quando é `cdwfinance`, **`crm_contracts.psp` diz por qual banco**, e a fatura carrega o
 snapshot desse provedor.
 
-**O que ainda NÃO acontece sozinho**: o cliente não recebe o boleto (etapa B), o pagamento não é
-reconhecido (etapas C e D) e a nota não é emitida (E–F). Hoje o boleto se entrega abrindo a fatura na
-tela, e a baixa **não tem caminho manual** — ela foi escondida de propósito, à espera de C e D.
+Desde 19/08/2026 o ciclo está **fechado em código**: o boleto vai ao cliente por e-mail (B), o
+pagamento é reconhecido por webhook (C) e por conciliação (D), a nota é emitida no ERP (E) e chega ao
+cliente (F). O encerramento do contrato no ERP (G) foi **descartado** — é feito à mão —, e a migração
+(H) é operação. Em código resta só a etapa **I** (WhatsApp), sem prioridade.
+
+⚠️ **Escrito não é testado.** As etapas B a F estão implementadas e com as guardas verificadas, mas
+nenhuma foi exercitada de ponta a ponta contra os serviços reais — ver *Situação de teste* abaixo.
 
 ---
 
 ## Resumo — todos os passos e o que já foi feito
 
-Situação em **18/08/2026** · `migration_version = 36` · legenda: ✅ pronto · 🟡 parcial · ⬜ não feito
+Situação em **19/08/2026** · `migration_version = 40` · legenda: ✅ pronto · 🟡 parcial · ⬜ não feito · ❌ descartado
+
+> ⚠️ **As contagens deste documento vêm do banco de DESENVOLVIMENTO**, que é base de teste e não
+> reflete a produção. Servem para exercitar código, nunca para dimensionar decisão. Em produção a
+> migração para `cdwfinance` **já está em andamento**, e parte da carteira já recebe boleto + NF no
+> mesmo e-mail (hoje emitidos pelo Bom Controle).
 
 | # | Passo | O que entrega | Onde vive | |
 |---|---|---|---|---|
@@ -31,15 +40,16 @@ Situação em **18/08/2026** · `migration_version = 36` · legenda: ✅ pronto 
 | **3a** | Parcelamento e cobrança avulsa | Competência dividida em N parcelas; venda pontual dentro do contrato | migration 031 · `Charge_model` | ✅ |
 | **3b** | Reajuste anual por índice | Acumulado composto de 12 meses, aviso prévio ao cliente | migration 024 · `Adjustment_model` · `cron_reajustar_contratos` | 🟡 sem índices lançados |
 | **3c** | Motivos de cancelamento | Catálogo global do porquê do encerramento | migration 032 | ✅ |
-| **3d** | Destinatários de aviso | Quem notificar sobre boleto, NF e reajuste, por contrato | migration 033 | 🟡 cadastro inerte |
+| **3d** | Destinatários de aviso | Quem notificar sobre boleto, NF e reajuste, por contrato | migration 033 · `Notification_model` (resolvedor único) | ✅ |
 | **4** | **Cobrança no PSP** | **A fatura vira boleto + PIX de verdade** — detalhe abaixo | migrations 034–036 · `Psp_provider` · `Psp_inter` · `Psp_model` | ✅ |
-| **5** | Envio do boleto por e-mail | Cliente recebe o boleto **anexo** (não há URL a mandar) | — | ⬜ **etapa B** |
-| **6** | Webhook de liquidação | Pagamento reconhecido em segundos, dá baixa e enfileira a NF | — | ⬜ **etapa C** |
-| **6a** | Conciliação por pull | Recupera o que o webhook perdeu e o que ficou sem registrar | — | ⬜ **etapa D** |
-| **7** | Emissão da NF no ERP | `CriarVendaProdutoServico` → `Venda/Obter` → `EfeturarPagamento`, em fila | — | ⬜ **etapa E** |
-| **8** | Envio da NF ao cliente | PDF e XML da nota | — | ⬜ **etapa F** |
-| **9** | Encerrar o contrato no ERP | Automático ao virar para `cdwfinance` | hoje é confirmação manual na tela | 🟡 **etapa G** |
-| **10** | Migração dos 402 contratos | Operação, não código | filtro de acompanhamento pronto (migration 026) | 🟡 **etapa H** |
+| **5** | Envio do boleto por e-mail | Cliente recebe o boleto **anexo**. Destrava a migração dos **35%** que não emitem nota; `com_boleto` fica represado até a E | migration 037 · `Notification_model` · `Invoice_model::enviarFatura()` · `cron_enviar_faturas` · `emails/billing/invoice.php` | ✅ |
+| **6** | Webhook de liquidação | Pagamento reconhecido em segundos, dá baixa e enfileira a NF. **Único caminho de baixa** — a manual está escondida | `Webhook.php` (público) · `csrf_exclude_uris` · `crm_psp_webhook_events` | ✅ *(sem teste real: exige URL pública)* |
+| **6a** | Conciliação por pull | Recupera o que o webhook perdeu e o que ficou sem registrar | migration 038 · `Psp_model::conciliarPeriodo()` · `cron_conciliar_cobrancas` | ✅ *(sem teste real: sandbox fora do ar)* |
+| **7** | Emissão da NF no ERP | `CriarVendaProdutoServico` → `Venda/Obter` → `EfeturarPagamento`, em fila. Destrava os **65%** que emitem nota | migration 039 · `Bomcontrole_model::emitirNota()` · `cron_emitir_notas` | ✅ *(nunca exercitado contra o ERP — ver riscos)* |
+| **8** | Envio da NF ao cliente | PDF e XML anexos. Em `com_boleto` vai junto do boleto; em `pos_compensacao`, e-mail próprio | migration 040 · `Invoice_model::enviarNota()` · `cron_enviar_notas` · `emails/billing/nota_fiscal.php` | ✅ *(sem teste real: depende de uma nota emitida)* |
+| **9** | Encerrar o contrato no ERP | **Feito à mão no Bom Controle**, por decisão (19/08/2026) | a trava de confirmação na tela do contrato é o controle | ❌ **etapa G descartada** |
+| **10** | Migração dos contratos | Operação, não código — **gradual, em produção**. Contrato que recebe NF só migra depois de E e F validadas, senão o cliente perde a nota | filtro de acompanhamento pronto (migration 026) | 🟡 **em andamento** |
+| **11** | Notificação por WhatsApp | O mesmo aviso do e-mail, por WhatsApp, na mesma fila | — | ⬜ **etapa I** · sem prioridade |
 
 ### O passo 4 em detalhe — o que a etapa A entregou
 
@@ -58,11 +68,47 @@ Situação em **18/08/2026** · `migration_version = 36` · legenda: ✅ pronto 
 | Cancelamento da fatura | Derruba a cobrança no banco primeiro; falha mantém a fatura aberta | ✅ |
 | Adoção de cobrança órfã | Depois de um envio ambíguo, **procura antes de criar** (casa pelo `seuNumero`) | 🟡 sem teste ponta a ponta |
 
+### Situação de teste — o que falta exercitar
+
+O código das etapas B a F está pronto e com as guardas verificadas. O que **não** foi feito é o teste
+de ponta a ponta contra os serviços reais, e cada um trava por um motivo diferente:
+
+| Etapa | O que falta | Por quê |
+|---|---|---|
+| **B** — envio do boleto | disparar `cron_enviar_faturas` com fatura real | nada trava: dá para testar quando quiser |
+| **C** — webhook | receber uma chamada do banco | exige **URL pública HTTPS**; o ambiente local não recebe |
+| **D** — conciliação | rodar `cron_conciliar_cobrancas` | exige o **sandbox do Inter aberto** (08h–20h) |
+| **E** — emissão da NF | rodar `cron_emitir_notas` | ⚠️ **escreve documento fiscal em produção** — ver riscos |
+| **F** — envio da nota | rodar `cron_enviar_notas` | depende de uma **nota emitida** (etapa E). O caminho degradado — link no corpo quando o download falha — está verificado |
+| — | adoção de cobrança órfã | precisa criar uma cobrança e simular o 500; o mecanismo (`seuNumero` na listagem) está confirmado |
+
+**Ordem sugerida, da mais barata para a mais cara de errar**: B (e-mail é reversível) → D (com o
+sandbox aberto) → E por último, num contrato de valor baixo e com a saída do cron à vista.
+
 ### O caminho crítico daqui
 
-**B → C+D**, nessa ordem. C e D **entram juntas**: o ambiente local não recebe webhook, então sem a
-conciliação a etapa C não tem como ser verificada aqui. E–F dependem de C (é ela que enfileira a NF);
-G e H não dependem de nenhuma delas.
+**O código acabou.** Com a etapa G descartada e a H sendo operação, resta em código apenas a **I**
+(WhatsApp), que não tem prioridade. Tudo o mais é **validação** e **migração**.
+
+| O que falta | Natureza |
+|---|---|
+| Validar B, C, D, E e F contra os serviços reais | teste |
+| Vincular o serviço do ERP em cada contrato que emite nota | operação |
+| Encerrar o `VendaContrato` no BC, contrato a contrato | operação |
+| Virar os contratos para `cdwfinance`, gradualmente | operação |
+| Etapa I — WhatsApp | código, sem prioridade |
+
+A carteira se divide em `com_boleto` **15%**, `pos_compensacao` **50%** e `nao_emitir` **35%**. Os
+**35%** dependem só de B validada; os outros **65%** dependem de E e F, e por isso do trabalho de
+vínculo de serviço.
+
+**O roteiro de virada de cada contrato**, agora que G é manual:
+
+1. vincular o serviço do ERP no contrato (aba do contrato);
+2. **encerrar o `VendaContrato` no painel do Bom Controle**;
+3. na tela do contrato, escolher o PSP, marcar a confirmação de que o ERP foi encerrado e salvar.
+
+O passo 3 recusa sem a marcação do passo 2 — é o que impede a cobrança dupla, e é definitivo.
 ---
 
 ## Placar do ROADMAP — o que está pronto e o que falta
@@ -122,7 +168,7 @@ Campos que já se preenchem na tela e ainda não movem nada — é exatamente o 
 | `obterVenda()` | `GET Venda/Obter/{id}` | E |
 | `efeturarPagamentoFatura()` *(sic)* | `PUT Fatura/EfeturarPagamento/{id}` | E |
 | `obterFatura()` | `GET Fatura/Obter/{id}` | F |
-| `encerrarVendaContrato()` | `DELETE VendaContrato/Encerrar/{id}` | G |
+| ~~`encerrarVendaContrato()`~~ | ~~`DELETE VendaContrato/Encerrar/{id}`~~ | ❌ **não será escrito** — etapa G descartada |
 | `pesquisarEmpresas()` | `GET Empresa/Pesquisar` | E (resolver o `IdEmpresa`) |
 
 **Colunas que não existem** — hoje a `crm_invoices` tem 18 colunas (a 031 acrescentou origem e parcela) e **nenhuma** delas guarda cobrança, pagamento ou nota:
@@ -181,7 +227,7 @@ motor de cobrança.**
   │                                │                                                                  │
   │  7. cron_emitir_notas ─────────┴──▶ [BC Venda/CriarVendaProdutoServico] → [BC Fatura/Efeturar…]    │
   │  8. e-mail ao cliente com PDF + XML da NF                                                          │
-  │  9. [BC VendaContrato/Encerrar] na virada do contrato                                              │
+  │  9. encerrar o VendaContrato NO PAINEL DO BC — passo manual do roteiro de migração                 │
   └───────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -245,19 +291,22 @@ handler do webhook. Ver a etapa E.
 
 ## Próximas etapas
 
-Numeração seguindo o fluxo acima. As etapas **A–C** são o caminho crítico; **D** e **G** são
-proteções que não dependem delas.
+Numeração seguindo o fluxo acima. O caminho crítico é **B → C+D → E+F**: 65% da carteira depende de
+nota fiscal, e o gatilho da nota de metade dela é o pagamento. **D deixou de ser "proteção"** — é
+requisito, tanto para o gatilho quanto porque nenhum contrato migrado tem hoje caminho de baixa na
+tela. **G** segue independente.
 
 | # | Etapa | O que entrega | Depende de | Decisão pendente |
 |---|---|---|---|---|
 | ~~**A**~~ | ~~**Integração com o PSP/banco**~~ | **PRONTA** (18/08/2026). Migration **034**; `Psp_provider` abstrata + `Psp_inter`; `Psp_model` como orquestrador único; PSP **selecionável por contrato**, com allowlist em `Psp_model::providers()` — PSP novo é uma library + uma linha. Ver [PLANO-PSP-COBRANCA.md](PLANO-PSP-COBRANCA.md). | Etapa 3 (**pronta**) | **Resolvida: Banco Inter** |
-| **B** | **Envio do boleto por e-mail** | `cron_enviar_faturas` manda o boleto **anexo** (não há URL a mandar) e carimba `sent_at`. Só envia fatura com `registration = 'registrada'` — antes disso não existe boleto. | A (**pronta**) | **Quem notificar** e texto do e-mail |
-| **C** | **Webhook de liquidação** | `Webhook.php` público, sem sessão, em `webhook/psp/<slug>/<token>`. Reconsulta a cobrança, grava `paid_at`/`paid_amount`/`paid_method`, vira o status para `paga` e **enfileira** a NF. | A (**pronta**) | — |
-| **D** | **Conciliação por pull** | `cron_conciliar_cobrancas`: varre o PSP e concilia o que o webhook não trouxe. **Deve entrar junto com C**, não depois — o ambiente local não recebe webhook, então sem ela a etapa C não tem como ser verificada aqui. | A (**pronta**) | Cadência (sugerido: 1×/dia) |
-| **E** | **Emissão da NF no ERP (com fila)** | `cron_emitir_notas` consome a fila: `Venda/CriarVendaProdutoServico` → `Venda/Obter` → `Fatura/EfeturarPagamento`. Migration com `bomcontrole_sale_id`, `bomcontrole_invoice_id`, `nf_status`, `nf_attempts`, `nf_last_error`, `nf_issued_at`. | C (o gatilho) + 2a (**pronta**) + `bomcontrole_customer_id` (**pronta**) | **`IdEmpresa`** e **gatilho por política** |
-| **F** | **Envio da NF por e-mail** | `Fatura/Obter/{id}` devolve **PDF e XML** da nota — os dois vão ao cliente. Campos `link_nota_fiscal` e `link_nota_fiscal_xml`. | E | — |
-| **G** | **Encerrar o contrato no ERP ao migrar** | `VendaContrato/Encerrar` automático quando o contrato passa a `billing_source = 'cdwfinance'`. Remove a confirmação manual da tela. | — (camada de escrita já existe) | — |
-| **H** | **Migração dos contratos** | Operação, não código: virar os contratos do ERP para cá, um a um. O filtro *"contrato sem vínculo com o Bom Controle"* da listagem de clientes (migration 026) é o painel de acompanhamento. | A–G | Ritmo da virada |
+| ~~**B**~~ | ~~**Envio do boleto por e-mail**~~ | `cron_enviar_faturas` manda o boleto **anexo** (não há URL a mandar) e carimba `sent_at`. Só envia fatura com `registration = 'registrada'`. Nasce com **lista de anexos** e com o **portão por política**: `com_boleto` fica represado até a nota existir, porque boleto e NF vão no **mesmo e-mail** (requisito). | A (**pronta**) | **Quem notificar** e texto do e-mail |
+| ~~**C**~~ | ~~**Webhook de liquidação**~~ | `Webhook.php` público, sem sessão, em `webhook/psp/<slug>/<token>`. Reconsulta a cobrança, grava `paid_at`/`paid_amount`/`paid_method`, vira o status para `paga` e **enfileira** a NF. | A (**pronta**) | — |
+| ~~**D**~~ | ~~**Conciliação por pull**~~ | `cron_conciliar_cobrancas`: varre o PSP e concilia o que o webhook não trouxe. **Deve entrar junto com C**, não depois — o ambiente local não recebe webhook, então sem ela a etapa C não tem como ser verificada aqui. | A (**pronta**) | Cadência (sugerido: 1×/dia) |
+| ~~**E**~~ | ~~**Emissão da NF no ERP (com fila)**~~ | `cron_emitir_notas` consome a fila: `Venda/CriarVendaProdutoServico` → `Venda/Obter` → `Fatura/EfeturarPagamento`. Migration com `bomcontrole_company_id`, `bomcontrole_sale_id`, `bomcontrole_invoice_id`, `nf_status`, `nf_attempts`, `nf_last_error`, `nf_issued_at`. **Destrava o `com_boleto` da etapa B.** | C (para `pos_compensacao`) + **402 vínculos de serviço**, que são operação e podem começar já | **`IdEmpresa`** e **gatilho por política** |
+| ~~**F**~~ | ~~**Envio da NF por e-mail**~~ | `Fatura/Obter/{id}` devolve **PDF e XML** da nota. Vale **só para `pos_compensacao`**, em que a nota sai depois do pagamento — no `com_boleto` ela já foi junto do boleto, no e-mail da etapa B. | E | — |
+| ❌ **G** | ~~**Encerrar o contrato no ERP ao migrar**~~ | **DESCARTADA em 19/08/2026.** O encerramento do `VendaContrato` é feito **à mão no Bom Controle**, por decisão de quem opera a migração. Ver o porquê abaixo. | — | **Resolvida: não implementar** |
+| **H** | **Migração dos contratos** | Operação, não código: virar os contratos do ERP para cá, um a um. **Já em andamento em produção.** O filtro *"contrato sem vínculo com o Bom Controle"* da listagem de clientes (migration 026) é o painel de acompanhamento. | B para a maioria; **E para quem recebe NF** | Ritmo da virada |
+| **I** | **Envio de notificação via WhatsApp** | Mesmo aviso que sai por e-mail (boleto, reajuste, NF), também por WhatsApp. Trabalha no **mesmo formato de enfileiramento** das mensagens — a fila e o provedor serão definidos depois. | B (o texto e os destinatários) | **Sem prioridade agora** · provedor e formato da fila |
 
 ### O que a etapa A deixou pronto para B, C e D
 
@@ -291,6 +340,144 @@ e a mesma rodada deve tratá-la. Hoje isso só acontece no `cron_gerar_faturas`.
 | **Assinatura do webhook** | Desconhecida. Confirmar ao registrar o webhook na etapa C. |
 | **Credencial de produção** | Só há sandbox. Boleto registrado costuma exigir homologação com o banco. |
 
+### Boleto e NF vão no MESMO e-mail — e o que isso faz com a ordem das etapas
+
+**Requisito de negócio, não preferência técnica** (definido em 18/08/2026): o cliente que recebe
+boleto **com** nota fiscal recebe **um único e-mail**, com os dois anexos. Duas razões, as duas do
+lado de fora do código:
+
+- **os clientes exigem** — boleto e nota chegando separados geram dúvida sobre o que pagar e
+  retrabalho de atendimento;
+- **produção usa o Brevo**, e cada disparo é custo: juntar os dois corta pela metade o volume de
+  e-mails dos contratos que emitem nota.
+
+> Correção a uma versão anterior deste documento, que tratava o envio conjunto como *"otimização de
+> conveniência"*. **Não é.** É requisito, e o desenho da etapa B tem de nascer com ele.
+
+**O que isso muda**: para `invoice_policy = 'com_boleto'`, a fatura **não pode ser enviada antes de a
+nota existir** — mandar só o boleto e a nota depois é justamente o que o requisito proíbe.
+
+#### ⚠️ Os números do banco local NÃO descrevem a produção
+
+Uma versão anterior desta seção usou as contagens do banco de desenvolvimento como se fossem a
+realidade, e concluiu que `com_boleto` "não afeta contrato nenhum". **Está errado.**
+
+| | Banco local (teste) | Produção |
+|---|---|---|
+| Contratos em `com_boleto` | 0 de 403 | **existem** — não são a maioria, mas são reais |
+| Contratos já migrados para `cdwfinance` | 1 | **a migração está em andamento** |
+| Serviço do ERP vinculado | 1 de 403 | não medido daqui |
+
+O banco local é uma **base de teste**: as contagens dele servem para exercitar código, não para
+dimensionar decisão. Qualquer número de produção precisa ser levantado lá.
+
+#### O que a produção muda no problema
+
+Hoje, quem recebe **boleto + NF no mesmo e-mail** já recebe assim — pelo **Bom Controle**, que emite
+os dois. Ou seja, o envio conjunto não é funcionalidade nova a construir: é **comportamento existente
+que a migração não pode regredir**.
+
+Isso reposiciona a etapa E. Ela deixa de ser "um passo adiante no fluxo" e passa a ser
+**pré-requisito de migração para uma parte da carteira**:
+
+> Um contrato que hoje recebe boleto + NF **não pode ser virado para `cdwfinance` antes da etapa E**.
+> Se for, o cliente passa a receber só o boleto — regressão que ele percebe no primeiro mês.
+
+O `billing_source` por contrato já protege isso: esses contratos simplesmente **continuam no ERP**
+até E existir. Não há risco de regressão acidental, desde que quem conduz a migração saiba disso —
+por isso está escrito aqui.
+
+#### A ordem recomendada continua B → E, e agora por um motivo mais forte
+
+Não é mais "o `com_boleto` não afeta ninguém". É:
+
+- **B destrava a migração da maioria** — os contratos sem NF podem ser virados assim que o envio do
+  boleto existir, e hoje eles não são virados porque ninguém receberia a cobrança;
+- **E destrava a minoria** que recebe NF, e é ela que tira esses contratos do ERP;
+- **E é bloqueada por trabalho operacional**, não por código: o vínculo do serviço do ERP em cada
+  contrato, feito à mão (o catálogo do BC tem 119 serviços e não casa por nome). A tela já existe
+  (`Contratos::json_postvincularservicobc`), então esse trabalho **corre em paralelo com a B**.
+
+Também sobrevive a qualquer ordem: `com_boleto` emite a nota **antes** do pagamento, então a baixa no
+ERP tem de vir depois, disparada por C ou D. **`com_boleto` completo depende de E + C + D.**
+
+#### A carteira de produção, e o que cada grupo precisa para migrar
+
+Distribuição informada em 18/08/2026:
+
+| Política | Fatia | O que o contrato precisa para sair do ERP |
+|---|---|---|
+| `com_boleto` — NF junto do boleto | **15%** | B + **E** |
+| `pos_compensacao` — NF depois do pagamento | **50%** | B + **C** + **D** + **E** + **F** |
+| `nao_emitir` — só boleto | **35%** | **B** |
+
+**65% da carteira depende da nota fiscal.** Só os 35% de `nao_emitir` migram com a B sozinha.
+
+#### A conclusão que os números mudam: depois da B vem C+D, não E
+
+Eu vinha tratando **D** como "proteção" e **C** como o passo do pagamento. Com esta distribuição, os
+dois viram **pré-requisito universal**:
+
+- **`pos_compensacao` são 50% da carteira, e o gatilho da nota deles é o PAGAMENTO.** Sem C e D não
+  há como saber que o cliente pagou, então a etapa E **não tem o que emitir** para metade da base.
+  Antecipar E serviria só aos 15% de `com_boleto`.
+- **Todo contrato migrado precisa de C+D, inclusive os 35% que não emitem nota.** Sem elas a fatura
+  paga fica marcada como vencida para sempre: a baixa manual **está escondida na tela** (o botão
+  segue comentado, à espera da automação), então hoje **não há caminho de interface para marcar uma
+  fatura como paga**. Um contrato migrado hoje nunca vê a fatura quitada.
+
+> Ordem recomendada: **B → C+D → E+F**.
+> A B destrava o envio para 100% e a migração para 35%; C+D destravam o reconhecimento do pagamento
+> para 100% e o gatilho da nota para 50%; E+F destravam os 65% que emitem nota.
+
+Antecipar E para antes de C+D inverteria a prioridade: entregaria a nota aos 15% e deixaria os 50%
+esperando o gatilho, com todos os migrados ainda sem baixa.
+
+#### O que corre em paralelo, sem código
+
+Os **vínculos de serviço do ERP** continuam sendo o gargalo operacional da E, e não dependem de
+nenhuma linha nova — a tela já existe. Priorizar nesta ordem:
+
+1. os **15% de `com_boleto`**, que são os primeiros a poder migrar depois da E (o gatilho deles é a
+   geração da fatura, não o pagamento);
+2. os **50% de `pos_compensacao`**, que só migram com a cadeia inteira pronta.
+#### Como a B nasce já pronta para o envio conjunto
+
+O requisito entra no **desenho da B**, não numa reforma futura. Três decisões, todas baratas agora e
+caras depois:
+
+| Decisão | Por quê |
+|---|---|
+| A rotina de envio monta uma **lista de anexos**, não um anexo | Acrescentar a nota (PDF + XML) depois vira uma linha, não uma reescrita |
+| A fila de envio tem um **portão por política**: `com_boleto` só fica elegível quando a nota estiver emitida | É o que garante o e-mail único. Sem o portão, a B mandaria só o boleto — a regressão exata que o requisito proíbe |
+| `nao_emitir` e `pos_compensacao` enviam **na hora** | Não há nota a esperar. `pos_compensacao` recebe a nota depois, em mensagem própria (etapa F) — ali o e-mail separado é o correto, porque o pagamento já aconteceu |
+
+Com isso, a etapa E **não toca na B**: quando a nota passa a ser emitida, os contratos `com_boleto`
+ficam elegíveis e saem com os dois anexos.
+
+
+### Por que a etapa G foi descartada
+
+Encerrar o `VendaContrato` no ERP continua sendo **obrigatório** na virada de cada contrato — o que
+mudou é quem faz: **uma pessoa, no painel do Bom Controle**, e não este sistema.
+
+A razão é a assimetria do erro. Automatizar o encerramento significa dar a um cron o poder de
+**desligar a cobrança de um contrato em produção**. Se ele errar o alvo, o cliente deixa de ser
+cobrado e ninguém percebe até o fechamento do mês — enquanto o erro oposto (esquecer de encerrar) é
+barulhento: o cliente recebe duas cobranças e reclama no mesmo dia. Com a migração sendo **gradual e
+supervisionada**, o ganho de automatizar é pequeno e o risco não é.
+
+**O que fica no lugar** — e passa a ser permanente, não um degrau temporário:
+
+> Ligar o faturamento num contrato que ainda tem `bomcontrole_contract_id` **exige a confirmação
+> explícita** de que ele foi encerrado no ERP (`Contratos::montarFaturamentoAtivo`). Sem a marcação,
+> o SALVAR recusa.
+
+Essa trava era descrita como provisória, "até a etapa G existir". **Não é mais**: ela é o controle
+definitivo contra cobrança dupla na virada.
+
+**Consequência para a library**: `encerrarVendaContrato()` não precisa ser escrito. É o único método
+do fluxo que sai da lista.
 ### Por que a emissão é fila, e não chamada no webhook (etapa E)
 
 Quatro razões, todas com consequência concreta:
@@ -377,7 +564,7 @@ o valor da fatura**, mesmo nos 215 contratos que têm dois tipos de serviço.
 | **Venda no ERP fica em aberto se a baixa falhar** | Se o `Fatura/EfeturarPagamento` falhar depois de a venda ter sido criada, o financeiro do BC guarda um recebível fantasma. A fila precisa tratar os dois passos como estados distintos (`nf_status`: emitida-sem-baixa é diferente de emitida) e retentar **só a baixa**, nunca a venda. |
 | **Webhook é superfície pública** | Endpoint sem sessão, fora do `MY_Controller`. Precisa de validação de assinatura do PSP (todos os candidatos assinam), responder 200 rápido, e **nunca** confiar no valor que vem no corpo — reconsultar a cobrança no PSP antes de dar baixa, mesma regra do `bomcontrole_contract_id` que é revalidado no `Obter`. |
 | **Rate limit na emissão em lote** | Três chamadas por nota × faturas do dia, contra um limite que devolve 429 em ~12 seguidas. A library já retenta com backoff, mas a fila precisa de espaçamento próprio e teto por rodada. |
-| **Cobrança dupla na virada** | Contrato ativo nos dois lados cobra o cliente duas vezes. Hoje a tela **bloqueia** a ativação até a confirmação manual de que foi encerrado no ERP; a etapa G automatiza. |
+| **Cobrança dupla na virada** | Contrato ativo nos dois lados cobra o cliente duas vezes. A tela **bloqueia** a ativação até a confirmação manual de que foi encerrado no ERP — e esse é o controle **definitivo**, já que a etapa G foi descartada. Encerrar no Bom Controle é passo obrigatório do roteiro de migração. |
 | **Boleto duplicado (PSP + ERP)** | O `CriarVendaProdutoServico` gera boleto se o objeto `FormaPagamento.Boleto` for informado. Na etapa E ele é **omitido**, sempre. Um `Boleto: {}` copiado do exemplo do collection manda uma segunda cobrança ao cliente. |
 
 ## Pendências operacionais (não são código)
@@ -385,6 +572,9 @@ o valor da fatura**, mesmo nos 215 contratos que têm dois tipos de serviço.
 | Item | Situação |
 |---|---|
 | **Índices de reajuste** | A tabela está **vazia**. Sem os 12 meses da janela, nenhum contrato é reajustado — a rotina pula e registra os meses faltando. Lançar em Gestão › Índices de reajuste. IGP-M e IPCA têm série no SGS do Banco Central (189 e 433); o **ICTI** não, então é lançamento manual de qualquer forma. |
+| **Conferir o CNPJ da empresa** | O cadastro local diz `18436107000142` e o Bom Controle diz `22863460000186`. A nota sai no CNPJ da empresa do ERP — se o certo for o outro, toda nota emitida sairia errada. Resolver **antes** da primeira emissão. |
+| **Levantar em PRODUÇÃO quantos contratos recebem NF** | É o número que decide se a etapa E corre em paralelo com a B ou depois dela. Contrato que recebe boleto + NF **não pode migrar** antes da E — regrediria para só o boleto. Medir quantos são e quanto representam em faturamento. |
+| **Vínculos de serviço do ERP** | Caminho crítico da etapa E, e é **trabalho humano**: o catálogo do BC tem 119 serviços granulares e não casa por nome. A tela já existe (aba do contrato) e **não depende de código novo** — pode correr em paralelo com a B, e encurta a E quando ela chegar. Priorizar os contratos que recebem NF, que são os bloqueados para migrar. |
 | **Política de NF por contrato** | `attributes.billing.needs_invoice` está vazio nos 386 clientes (a importação do gestor-interno não trouxe o dado), então o padrão efetivo é `nao_emitir` e cada contrato precisa ser definido à mão. |
 | **Credencial de PRODUÇÃO do Inter** | Só existe sandbox cadastrado. Gerar a integração de produção no internet banking (com os escopos `boleto-cobranca.read/write` e `webhook.read/write`), enviar o par .crt/.key na aba **Cobrança (PSP)** da empresa e virar o ambiente para `producao`. Boleto registrado costuma exigir homologação com o banco e não é imediato. |
 | **URL pública HTTPS para o webhook** | O Inter exige HTTPS com certificado válido, e o ambiente local (MAMP na 8081) não recebe. É pré-requisito da etapa C — e a razão de a etapa D entrar junto. |
@@ -425,6 +615,8 @@ envio e a conciliação, **depois** da geração:
 0 9 * * *  php index.php cron cron_conciliar_cobrancas   # etapa D
 ```
 
+As duas já existem e estão registradas em `crm_cron_logs` (migrations 037 e 038).
+
 ⚠️ As duas rotinas novas precisam da linha correspondente em **`crm_cron_logs`**, criada na migration
 que as introduzir — sem ela não aparecem no painel Gestão › Cron e o `isCronActive()` as trata como
 inexistentes. A 034 **não** registrou `cron_conciliar_cobrancas` de propósito: uma rotina cadastrada
@@ -443,7 +635,27 @@ Todos verificados no collection `docs/bomcontrole.postman_collection.json`.
 | E | `Fatura/EfeturarPagamento/{id}` *(sic)* | PUT | — |
 | F | `Fatura/Obter/{id}` | GET | links do **PDF e do XML** da NF |
 | G | `VendaContrato/Encerrar/{id}` | DELETE | — |
-| — | `Empresa/Pesquisar?pesquisa=` | GET | `[{Id, Documento, Nome, Padrao}]` |
+| — | `Empresa/Pesquisar?pesquisa=` | GET | `[{Id, Documento, Nome, Padrao}]` — **não filtra por documento**, ver abaixo |
 
+
+### `Empresa/Pesquisar` — medido na conta real (19/08/2026)
+
+Três fatos que contrariam o que este documento supunha, e que moldaram o
+`resolverIdEmpresa()`:
+
+| Fato | Consequência |
+|---|---|
+| **A busca NÃO filtra por documento.** `pesquisa=<CNPJ>`, com ou sem máscara, devolve **lista vazia** | O CNPJ não serve de critério de busca; a chamada é feita com o termo **vazio**, que lista tudo — e a chave da API já escopa o resultado ao tenant |
+| Termo vazio devolve todas as empresas da conta | Na conta da CDW há **uma só**, com `Padrao: true` |
+| **O CNPJ no ERP diverge do cadastrado aqui** (`22863460000186` contra `18436107000142`) | O documento deixou de ser âncora e virou **conferência**: é mostrado ao usuário, e a divergência sai como **aviso amarelo**, nunca como erro que trave |
+
+Com uma empresa só na conta, ela é adotada — mas a resposta sempre diz qual nome
+e qual documento foram gravados, para a divergência ficar visível em vez de
+silenciosa. Com várias e nenhuma casando pelo documento, o método **recusa e
+lista as candidatas**: gravar a empresa errada faria toda nota futura sair no
+CNPJ errado, e isso é problema fiscal, não de tela.
+
+⚠️ **Pendência operacional**: conferir qual CNPJ está certo — o do cadastro local
+ou o do ERP. Enquanto divergirem, a nota sai no da empresa do Bom Controle.
 **Não usados de propósito**: `Fatura/GerarBoleto` e `FormaPagamento.Boleto` (o boleto é do PSP),
 `VendaContrato/Criar` (o contrato é local), `Venda/Criar` (sem o booleano `Emite`).

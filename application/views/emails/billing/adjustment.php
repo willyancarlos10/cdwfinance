@@ -6,12 +6,23 @@
  * envolve isto com emails/header e emails/footer.
  *
  * `$mensagem` é o texto que o usuário escreveu em Parâmetros gerais, com os
- * marcadores já substituídos. Vem como texto puro e é escapado aqui — o corpo
- * é editável na tela, e injetar HTML dele no e-mail de um cliente seria dar a
- * quem edita um canal para quebrar (ou forjar) a mensagem. As quebras de linha
- * viram <br /> para o texto respirar no HTML.
+ * marcadores já substituídos. **Desde 18/08/2026 ele vem do editor da tela, em
+ * HTML**, e por isso NÃO é mais escapado aqui.
+ *
+ * A troca é uma decisão de confiança explícita: quem edita o campo é um usuário
+ * autenticado do painel, em Parâmetros gerais, escrevendo o e-mail da própria
+ * empresa. É o mesmo grau de confiança de qualquer campo rich-text de CMS.
+ * O que NÃO pode entrar aqui é conteúdo vindo do cliente final ou de API —
+ * esses continuam precisando de escape.
+ *
+ * Conteúdo ANTIGO, salvo como texto puro antes do editor, continua funcionando:
+ * sem nenhuma tag, as quebras de linha viram <br />. Detectar é mais barato que
+ * migrar, e os dois formatos convivem sem data para acabar.
  */
-$mensagemHtml = nl2br(htmlspecialchars((string) $mensagem, ENT_QUOTES, 'UTF-8'));
+$mensagem = (string) $mensagem;
+$mensagemHtml = ($mensagem === strip_tags($mensagem))
+    ? nl2br(htmlspecialchars($mensagem, ENT_QUOTES, 'UTF-8'))
+    : $mensagem;
 ?>
 <!-- title end -->
 <tr>

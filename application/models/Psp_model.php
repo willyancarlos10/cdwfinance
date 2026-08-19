@@ -50,6 +50,13 @@ class Psp_model extends CI_Model
      */
     const MARCA_ENVIO_AMBIGUO = 'FALHA_ENVIO';
 
+    /** Janela da conciliação, em dias de VENCIMENTO (boleto vencido segue pagável). */
+    const DIAS_CONCILIACAO_PASSADO = 90;
+    const DIAS_CONCILIACAO_FUTURO = 30;
+
+    /** Teto de páginas por conta/rodada — 100 itens cada. */
+    const MAX_PAGINAS_CONCILIACAO = 10;
+
     /** Orçamento de tempo da rodada do cron, no idioma do Server_model. */
     const ORCAMENTO_COBRANCAS_SEGUNDOS = 240;
 
@@ -1224,6 +1231,358 @@ class Psp_model extends CI_Model
             'registrando' => 'Registrando',
             'registrada' => 'Registrada',
         ];
+    }
+
+    /**
+     * URL pública do webhook desta conta.
+     *
+     * O token vai no CAMINHO, não em parâmetro: assim ele não aparece em log de
+     * proxy como query string, e o handler resolve tenant + PSP antes de tocar
+     * no corpo.
+     *
+     * @param  object $conta
+     * @return string '' quando a conta não tem token
+     */
+    public function urlWebhook($conta)
+    {
+        if (empty($conta) || empty($conta->webhook_token)) return '';
+
+        return rtrim(base_url(), '/') . '/webhook/psp/'
+            . rawurlencode((string) $conta->psp) . '/'
+            . rawurlencode((string) $conta->webhook_token);
+    }
+
+    /**
+     * Aponta a URL do webhook no provedor.
+     *
+     * Sem isto a etapa C fica inerte: o endpoint existe e ninguém chama. O
+     * provedor exige HTTPS com certificado válido, então **isto não funciona
+     * do ambiente local** — é ação de produção.
+     *
+     * @param  int    $idCompany
+     * @param  string $psp
+     * @return array success, message, data => ['url']
+     */
+    public function registrarWebhook($idCompany, $psp)
+    {
+        $conta = $this->getAccount($idCompany, $psp);
+        $url = $this->urlWebhook($conta);
+
+        if ($url === '') {
+            return $this->resposta(FALSE, 'Esta conta ainda não tem token de webhook. Salve a credencial primeiro.');
+        }
+
+        $config = $this->getConfig($idCompany, $psp);
+        if (!$config['success']) {
+            return $this->resposta(FALSE, $config['message']);
+        }
+
+        $provider = $this->provider($psp);
+        if ($provider === NULL) {
+            return $this->resposta(FALSE, 'Provedor de cobrança desconhecido.');
+        }
+
+        $sessao = sessao_suspender();
+        try {
+            $resultado = $provider->registrarWebhook($config['config'], $url);
+        } finally {
+            sessao_retomar($sessao);
+        }
+
+        if (empty($resultado['success'])) {
+            $this->logarErro($idCompany, $psp, 'registrarWebhook', (string) $resultado['message']);
+            return $this->resposta(FALSE, (string) $resultado['message']);
+        }
+
+        return $this->resposta(TRUE, 'Webhook registrado no ' . $this->rotulo($psp) . '.', ['url' => $url]);
+    }
+
+    // ------------------------------------------------------------------
+    // Conciliação e baixa (etapas C e D)
+    // ------------------------------------------------------------------
+
+    /**
+     * Reconsulta UMA cobrança no provedor e aplica a baixa se ela estiver paga.
+     *
+     * É o caminho do WEBHOOK (etapa C): o corpo recebido diz apenas QUAL
+     * cobrança olhar, e a verdade vem desta consulta. Nunca acreditar no valor
+     * que chega no corpo é a mesma regra que revalida o
+     * `bomcontrole_contract_id` no `Obter` — e aqui ela vale ainda mais,
+     * porque o webhook do Inter pode não ser assinado.
+     *
+     * @param  int $idInvoice
+     * @param  int $idCompany
+     * @param  int $idUser
+     * @return array success, message, data => ['baixou' => bool, 'situacao']
+     */
+    public function conciliarCobranca($idInvoice, $idCompany, $idUser)
+    {
+        $fatura = $this->global_model->getWhere_off('crm_invoices', [
+            'id' => (int) $idInvoice,
+            'id_company' => (int) $idCompany,
+        ], TRUE);
+
+        if (empty($fatura)) {
+            return $this->resposta(FALSE, 'Fatura não encontrada.');
+        }
+
+        $psp = trim((string) $fatura->psp);
+        $chargeId = trim((string) $fatura->psp_charge_id);
+
+        if ($psp === '' || $chargeId === '') {
+            return $this->resposta(FALSE, 'Fatura sem cobrança registrada — nada a conciliar.');
+        }
+
+        // IDEMPOTÊNCIA: o PSP reenvia o mesmo evento quando o handler demora ou
+        // erra, e a conciliação por pull passa pela mesma cobrança todo dia.
+        // `paid_at` preenchido é o carimbo que impede a segunda baixa.
+        if (!empty($fatura->paid_at)) {
+            return $this->resposta(TRUE, 'Fatura já estava baixada.', ['baixou' => FALSE]);
+        }
+
+        $config = $this->getConfig($idCompany, $psp);
+        if (!$config['success']) {
+            return $this->resposta(FALSE, $config['message']);
+        }
+
+        $provider = $this->provider($psp);
+        if ($provider === NULL) {
+            return $this->resposta(FALSE, 'Provedor de cobrança desconhecido.');
+        }
+
+        $sessao = sessao_suspender();
+        try {
+            $resultado = $provider->consultarCobranca($config['config'], $chargeId);
+        } finally {
+            sessao_retomar($sessao);
+        }
+
+        if (empty($resultado['success'])) {
+            $this->logarErro($idCompany, $psp, 'conciliar fatura=' . (int) $idInvoice, (string) $resultado['message']);
+            return $this->resposta(FALSE, (string) $resultado['message'], ['transient' => !empty($resultado['transient'])]);
+        }
+
+        $dados = isset($resultado['data']) && is_array($resultado['data']) ? $resultado['data'] : [];
+
+        return $this->aplicarBaixa($fatura, $dados, $idUser);
+    }
+
+    /**
+     * Concilia um PERÍODO inteiro, por listagem — o caminho do CRON (etapa D).
+     *
+     * Consulta uma a uma custaria uma chamada por fatura em aberto: com ~400
+     * faturas seriam ~400 requisições por rodada, contra um rate limit que
+     * estoura em ~6 seguidas. A listagem traz 100 por página, então o mesmo
+     * trabalho cabe em poucas chamadas — e é por isso que `seuNumero` carrega o
+     * id da fatura desde a emissão: o casamento é feito aqui, sem depender de
+     * ter o `psp_charge_id` gravado.
+     *
+     * @param  int    $idCompany
+     * @param  string $psp
+     * @param  int    $idUser
+     * @return array baixadas, conferidas, falhas, mensagens
+     */
+    public function conciliarPeriodo($idCompany, $psp, $idUser)
+    {
+        $saida = ['baixadas' => 0, 'conferidas' => 0, 'falhas' => 0, 'mensagens' => []];
+
+        $config = $this->getConfig($idCompany, $psp);
+        if (!$config['success']) {
+            $saida['falhas']++;
+            $saida['mensagens'][] = $config['message'];
+            return $saida;
+        }
+
+        $provider = $this->provider($psp);
+        if ($provider === NULL) {
+            $saida['falhas']++;
+            $saida['mensagens'][] = 'Provedor de cobrança desconhecido.';
+            return $saida;
+        }
+
+        // A janela é de VENCIMENTO, que é como o Inter filtra. Recua bastante
+        // porque cobrança vencida continua pagável: um boleto de 60 dias atrás
+        // pago hoje precisa ser encontrado.
+        $filtros = [
+            'data_inicial' => date('Y-m-d', strtotime('-' . self::DIAS_CONCILIACAO_PASSADO . ' days')),
+            'data_final' => date('Y-m-d', strtotime('+' . self::DIAS_CONCILIACAO_FUTURO . ' days')),
+            'por_pagina' => 100,
+        ];
+
+        for ($pagina = 1; $pagina <= self::MAX_PAGINAS_CONCILIACAO; $pagina++) {
+            $filtros['pagina'] = $pagina;
+
+            $sessao = sessao_suspender();
+            try {
+                $lista = $provider->listarCobrancas($config['config'], $filtros);
+            } finally {
+                sessao_retomar($sessao);
+            }
+
+            if (empty($lista['success'])) {
+                $saida['falhas']++;
+                $saida['mensagens'][] = 'página ' . $pagina . ': ' . $lista['message'];
+                $this->logarErro($idCompany, $psp, 'conciliarPeriodo pagina=' . $pagina, (string) $lista['message']);
+                return $saida;
+            }
+
+            $itens = isset($lista['data']['itens']) && is_array($lista['data']['itens']) ? $lista['data']['itens'] : [];
+
+            foreach ($itens as $item) {
+                $saida['conferidas']++;
+
+                $fatura = $this->faturaDoItem($item, $idCompany, $psp);
+                if (empty($fatura)) continue;
+
+                // Só quem está em aberto e sem baixa interessa: reaplicar num
+                // registro já quitado reescreveria a data do pagamento.
+                if ((string) $fatura->status !== 'aberta' || !empty($fatura->paid_at)) continue;
+
+                $r = $this->aplicarBaixa($fatura, $item, $idUser);
+
+                if (!empty($r['data']['baixou'])) {
+                    $saida['baixadas']++;
+                } elseif (empty($r['success'])) {
+                    $saida['falhas']++;
+                    $saida['mensagens'][] = 'fatura #' . (int) $fatura->id . ': ' . $r['message'];
+                }
+            }
+
+            // `ultimaPagina` vem do próprio envelope do provedor: é critério de
+            // parada mais confiável que contar páginas do nosso lado.
+            if (!empty($lista['data']['ultima_pagina']) || empty($itens)) break;
+
+            usleep(self::ESPACAMENTO_COBRANCAS_MICROSSEGUNDOS);
+        }
+
+        return $saida;
+    }
+
+    /**
+     * Acha a fatura de um item devolvido pelo provedor.
+     *
+     * Tenta primeiro pelo `charge_id` (o vínculo forte) e depois pela
+     * `referencia`, que é o `seuNumero` — o id da nossa fatura. A segunda via
+     * existe para a cobrança órfã: emissão que deu certo no banco mas cujo id
+     * não chegou a ser gravado aqui.
+     *
+     * @param  array  $item
+     * @param  int    $idCompany
+     * @param  string $psp
+     * @return object|null
+     */
+    private function faturaDoItem(array $item, $idCompany, $psp)
+    {
+        $chargeId = trim((string) ($item['charge_id'] ?? ''));
+
+        if ($chargeId !== '') {
+            $fatura = $this->global_model->getWhere_off('crm_invoices', [
+                'psp_charge_id' => $chargeId,
+                'id_company' => (int) $idCompany,
+            ], TRUE);
+
+            if (!empty($fatura)) return $fatura;
+        }
+
+        $referencia = trim((string) ($item['referencia'] ?? ''));
+        if ($referencia === '' || !ctype_digit($referencia)) return NULL;
+
+        $fatura = $this->global_model->getWhere_off('crm_invoices', [
+            'id' => (int) $referencia,
+            'id_company' => (int) $idCompany,
+        ], TRUE);
+
+        // O `seuNumero` é texto livre do lado do banco: conferir que a fatura
+        // encontrada é mesmo deste provedor evita casar com um id coincidente.
+        if (empty($fatura) || (string) $fatura->psp !== (string) $psp) return NULL;
+
+        return $fatura;
+    }
+
+    /**
+     * Aplica (ou não) a baixa, a partir do retrato normalizado do provedor.
+     *
+     * Ponto ÚNICO da baixa: o webhook e a conciliação chegam aqui pelos dois
+     * caminhos. Regra duplicada em duas vias vira duas regras, e bastaria uma
+     * esquecer o `paid_at` para o sistema passar a cobrar quem já pagou,
+     * conforme o caminho que descobriu o pagamento.
+     *
+     * @param  object $fatura
+     * @param  array  $dados retrato normalizado (situacao, paid_at, ...)
+     * @param  int    $idUser
+     * @return array
+     */
+    private function aplicarBaixa($fatura, array $dados, $idUser)
+    {
+        $situacao = (string) ($dados['situacao'] ?? '');
+        $campos = [];
+
+        if (isset($dados['psp_status']) && $dados['psp_status'] !== '') {
+            $campos['psp_status'] = mb_substr((string) $dados['psp_status'], 0, 30);
+        }
+
+        if ($situacao !== Psp_provider::SIT_PAGA) {
+            // Não pagou: guarda o retrato para diagnóstico e não toca no
+            // status. Cobrança CANCELADA no provedor também não cancela a
+            // fatura sozinha — isso é decisão de quem opera, não do cron.
+            if (!empty($campos)) {
+                $campos['modified'] = date('Y-m-d H:i:s');
+                $campos['modified_by'] = (int) $idUser;
+                $this->global_model->edit('crm_invoices', $campos, 'id', (int) $fatura->id);
+            }
+
+            return $this->resposta(TRUE, 'Ainda não paga.', ['baixou' => FALSE, 'situacao' => $situacao]);
+        }
+
+        // O valor e a data são os DO PROVEDOR, não os nossos: o cliente pode
+        // ter pago com juros, desconto ou em data diferente, e é o extrato do
+        // banco que vale na conciliação.
+        $campos['status'] = 'paga';
+        $campos['paid_at'] = isset($dados['paid_at']) && $dados['paid_at'] !== ''
+            ? (string) $dados['paid_at'] . ' 00:00:00'
+            : date('Y-m-d H:i:s');
+
+        if (isset($dados['paid_amount']) && (float) $dados['paid_amount'] > 0) {
+            $campos['paid_amount'] = (float) $dados['paid_amount'];
+        } else {
+            $campos['paid_amount'] = (float) $fatura->value;
+        }
+
+        if (isset($dados['paid_method']) && $dados['paid_method'] !== '') {
+            $campos['paid_method'] = mb_substr((string) $dados['paid_method'], 0, 20);
+        }
+
+        $campos['modified'] = date('Y-m-d H:i:s');
+        $campos['modified_by'] = (int) $idUser;
+
+        $this->global_model->edit('crm_invoices', $campos, 'id', (int) $fatura->id);
+
+        // A emissão da NF é enfileirada AQUI: este é o momento em que o
+        // pagamento passa a ser fato para o sistema, e é o gatilho do
+        // `pos_compensacao`. Ponto único — o webhook e a conciliação chegam
+        // aos dois pelo mesmo caminho.
+        $this->load->model('bomcontrole_model');
+        $this->bomcontrole_model->enfileirarNota((int) $fatura->id, 'baixa');
+
+        return $this->resposta(TRUE, 'Baixa aplicada.', [
+            'baixou' => TRUE,
+            'situacao' => $situacao,
+            'valor' => $campos['paid_amount'],
+        ]);
+    }
+
+    /**
+     * Contas de PSP ativas, para o cron varrer sem saber de tenants.
+     *
+     * @return array linhas de crm_psp_accounts
+     */
+    public function contasAtivas()
+    {
+        $consulta = $this->db->query(
+            'SELECT `id_company`, `psp` FROM `crm_psp_accounts` WHERE `active` = 1 ORDER BY `id_company` ASC'
+        );
+
+        return ($consulta === FALSE) ? [] : $consulta->result();
     }
 
     // ------------------------------------------------------------------

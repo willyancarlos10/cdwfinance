@@ -477,6 +477,284 @@ class Cron extends CI_Controller
   }
 
   /**
+   * Envia ao cliente a cobrança de cada fatura registrada e ainda não enviada.
+   *
+   * Não entrega o e-mail: ENFILEIRA em `crm_cron`, e quem entrega é o
+   * `cron_enviar_email`, que já existe. Assim uma indisponibilidade de SMTP não
+   * derruba a rodada, e o espaçamento de entrega é problema de quem entrega.
+   *
+   * Contrato `com_boleto` fica de fora: ele recebe boleto e nota fiscal no
+   * MESMO e-mail, e a nota é a etapa E. Mandar só o boleto agora seria a
+   * regressão que o requisito proíbe. Ver `Invoice_model::getSendableInvoices()`.
+   */
+  public function cron_enviar_faturas()
+  {
+    if (!$this->isCronActive('cron_enviar_faturas')) return;
+
+    @set_time_limit(0);
+
+    $lockHandle = $this->travar('cron_enviar_faturas');
+    if ($lockHandle === FALSE) return;
+
+    $this->load->model('invoice_model');
+
+    $idUser = (int) $this->config->item('id_user_process_auto');
+
+    // Limpeza ANTES do envio: os anexos desta rodada precisam sobreviver até o
+    // cron_enviar_email entregar, o que acontece numa requisição posterior.
+    $limpos = $this->invoice_model->limparAnexosAntigos();
+    if ($limpos > 0) {
+      echo "cron_enviar_faturas: {$limpos} anexo(s) antigo(s) removido(s)." . PHP_EOL;
+    }
+
+    $faturas = $this->invoice_model->getSendableInvoices();
+    $total = count($faturas);
+
+    echo "cron_enviar_faturas: {$total} fatura(s) a enviar." . PHP_EOL;
+
+    $enviadas = 0;
+    $falhas = 0;
+    $mensagensDeErro = [];
+
+    foreach ($faturas as $fatura) {
+      $rotulo = 'fatura #' . (int) $fatura->id;
+
+      try {
+        $resultado = $this->invoice_model->enviarFatura($fatura, $idUser);
+      } catch (Throwable $e) {
+        $resultado = ['success' => FALSE, 'message' => $e->getMessage()];
+      }
+
+      if (empty($resultado['success'])) {
+        $falhas++;
+        $mensagensDeErro[] = $rotulo . ': ' . $resultado['message'];
+        echo "  [ERRO] {$rotulo}: {$resultado['message']}" . PHP_EOL;
+        continue;
+      }
+
+      $enviadas++;
+      echo "  [OK]   {$rotulo}: {$resultado['message']}" . PHP_EOL;
+    }
+
+    $this->global_model->edit('crm_cron_logs', [
+      'modified' => date('Y-m-d H:i:s'),
+      'errors' => empty($mensagensDeErro) ? NULL : mb_substr(implode(' | ', $mensagensDeErro), 0, 5000),
+    ], 'name', 'cron_enviar_faturas');
+
+    $this->destravar($lockHandle);
+
+    echo "Concluído: {$enviadas} enfileirada(s), {$falhas} com erro." . PHP_EOL;
+  }
+  /**
+   * Concilia as cobranças no PSP: descobre quem pagou e dá baixa.
+   *
+   * Existe porque webhook é entrega *best-effort* — o PSP fora do ar na hora do
+   * pagamento, o servidor daqui em deploy, uma mudança de URL: qualquer um
+   * perde o evento em silêncio, e o sintoma é o pior possível, uma **fatura
+   * paga marcada como vencida**, cobrando quem já pagou.
+   *
+   * Concilia por LISTAGEM, não fatura a fatura: consultar uma a uma custaria
+   * ~400 requisições por rodada, contra um rate limit que estoura em ~6
+   * seguidas. A listagem traz 100 por página.
+   *
+   * Roda também a fila de registro (`processarPendentes`), porque fatura sem
+   * cobrança é o outro jeito de o cliente não conseguir pagar — e as duas
+   * pendências vivem no mesmo lugar.
+   */
+  public function cron_conciliar_cobrancas()
+  {
+    if (!$this->isCronActive('cron_conciliar_cobrancas')) return;
+
+    @set_time_limit(0);
+
+    $lockHandle = $this->travar('cron_conciliar_cobrancas');
+    if ($lockHandle === FALSE) return;
+
+    $this->load->model('psp_model');
+
+    $idUser = (int) $this->config->item('id_user_process_auto');
+    $contas = $this->psp_model->contasAtivas();
+
+    echo 'cron_conciliar_cobrancas: ' . count($contas) . ' conta(s) de PSP ativa(s).' . PHP_EOL;
+
+    $baixadas = 0;
+    $conferidas = 0;
+    $falhas = 0;
+    $mensagensDeErro = [];
+
+    foreach ($contas as $conta) {
+      $rotulo = 'empresa #' . (int) $conta->id_company . '/' . $conta->psp;
+
+      try {
+        $r = $this->psp_model->conciliarPeriodo((int) $conta->id_company, (string) $conta->psp, $idUser);
+      } catch (Throwable $e) {
+        $r = ['baixadas' => 0, 'conferidas' => 0, 'falhas' => 1, 'mensagens' => [$e->getMessage()]];
+      }
+
+      $baixadas += (int) $r['baixadas'];
+      $conferidas += (int) $r['conferidas'];
+      $falhas += (int) $r['falhas'];
+
+      foreach ($r['mensagens'] as $mensagem) {
+        $mensagensDeErro[] = $rotulo . ': ' . $mensagem;
+      }
+
+      echo sprintf('  %s: %d conferida(s), %d baixa(s), %d falha(s).%s',
+        $rotulo, $r['conferidas'], $r['baixadas'], $r['falhas'], PHP_EOL);
+    }
+
+    // Fatura sem cobrança registrada também impede o cliente de pagar. A
+    // regra é a mesma do cron de geração — só o escopo muda.
+    $pendentes = $this->psp_model->processarPendentes(['id_user' => $idUser]);
+
+    echo sprintf('  registro: %d registrada(s), %d atualizada(s), %d falha(s).%s',
+      $pendentes['registradas'], $pendentes['sincronizadas'], $pendentes['falhas'], PHP_EOL);
+
+    foreach ($pendentes['mensagens'] as $mensagem) {
+      $mensagensDeErro[] = 'registro: ' . $mensagem;
+    }
+
+    $this->global_model->edit('crm_cron_logs', [
+      'modified' => date('Y-m-d H:i:s'),
+      'errors' => empty($mensagensDeErro) ? NULL : mb_substr(implode(' | ', $mensagensDeErro), 0, 5000),
+    ], 'name', 'cron_conciliar_cobrancas');
+
+    $this->destravar($lockHandle);
+
+    echo "Concluído: {$conferidas} cobrança(s) conferida(s), {$baixadas} baixa(s), {$falhas} falha(s)." . PHP_EOL;
+  }
+  /**
+   * Emite no ERP as notas das faturas que entraram na fila.
+   *
+   * É FILA, e não chamada no webhook, por quatro razões concretas: a prefeitura
+   * cai (NFS-e depende do serviço municipal); o PSP retenta e um handler que
+   * emite direto emitiria duas notas; são três chamadas encadeadas num rate
+   * limit que devolve 429 em ~12 seguidas; e nota fiscal errada se corrige com
+   * carta de correção, não com DELETE.
+   *
+   * ⚠️ ESTA ROTINA ESCREVE NO ERP DE PRODUÇÃO. A primeira execução deve ser
+   * supervisionada, num contrato de valor baixo — ver os riscos no ROADMAP.
+   */
+  public function cron_emitir_notas()
+  {
+    if (!$this->isCronActive('cron_emitir_notas')) return;
+
+    @set_time_limit(0);
+
+    $lockHandle = $this->travar('cron_emitir_notas');
+    if ($lockHandle === FALSE) return;
+
+    $this->load->model('bomcontrole_model');
+
+    $idUser = (int) $this->config->item('id_user_process_auto');
+    $faturas = $this->bomcontrole_model->filaNotas();
+
+    echo 'cron_emitir_notas: ' . count($faturas) . ' fatura(s) na fila.' . PHP_EOL;
+
+    $emitidas = 0;
+    $falhas = 0;
+    $mensagensDeErro = [];
+
+    foreach ($faturas as $fatura) {
+      $rotulo = 'fatura #' . (int) $fatura->id;
+
+      try {
+        $r = $this->bomcontrole_model->emitirNota((int) $fatura->id, (int) $fatura->id_company, $idUser);
+      } catch (Throwable $e) {
+        $r = ['success' => FALSE, 'message' => $e->getMessage(), 'data' => []];
+      }
+
+      if (empty($r['success'])) {
+        $falhas++;
+        $definitivo = !empty($r['data']['definitivo']) ? ' [DEFINITIVO]' : '';
+        $mensagensDeErro[] = $rotulo . ': ' . $r['message'] . $definitivo;
+        echo "  [ERRO]{$definitivo} {$rotulo}: {$r['message']}" . PHP_EOL;
+      } else {
+        $emitidas++;
+        echo "  [OK]   {$rotulo}: {$r['message']}" . PHP_EOL;
+      }
+
+      // O ERP devolve 429 em ~12 chamadas seguidas, e cada nota gasta três.
+      usleep(Bomcontrole_model::NF_ESPACAMENTO_MICROSSEGUNDOS);
+    }
+
+    $this->global_model->edit('crm_cron_logs', [
+      'modified' => date('Y-m-d H:i:s'),
+      'errors' => empty($mensagensDeErro) ? NULL : mb_substr(implode(' | ', $mensagensDeErro), 0, 5000),
+    ], 'name', 'cron_emitir_notas');
+
+    $this->destravar($lockHandle);
+
+    echo "Concluído: {$emitidas} nota(s) emitida(s), {$falhas} com erro." . PHP_EOL;
+  }
+  /**
+   * Envia ao cliente a nota fiscal já emitida.
+   *
+   * **Só `pos_compensacao`.** No `com_boleto` a nota vai junto do boleto, no
+   * e-mail do `cron_enviar_faturas` — mandá-la de novo aqui seria o segundo
+   * disparo que o requisito de negócio proíbe (e um custo a mais no Brevo).
+   *
+   * Enfileira, não entrega: quem entrega é o `cron_enviar_email`.
+   */
+  public function cron_enviar_notas()
+  {
+    if (!$this->isCronActive('cron_enviar_notas')) return;
+
+    @set_time_limit(0);
+
+    $lockHandle = $this->travar('cron_enviar_notas');
+    if ($lockHandle === FALSE) return;
+
+    $this->load->model('invoice_model');
+
+    $idUser = (int) $this->config->item('id_user_process_auto');
+
+    // Limpeza antes do envio, mesmo motivo do cron do boleto: os anexos desta
+    // rodada precisam sobreviver até a entrega, que é uma requisição adiante.
+    $limpos = $this->invoice_model->limparAnexosAntigos();
+    if ($limpos > 0) {
+      echo "cron_enviar_notas: {$limpos} anexo(s) antigo(s) removido(s)." . PHP_EOL;
+    }
+
+    $notas = $this->invoice_model->getSendableNotas();
+    $total = count($notas);
+
+    echo "cron_enviar_notas: {$total} nota(s) a enviar." . PHP_EOL;
+
+    $enviadas = 0;
+    $falhas = 0;
+    $mensagensDeErro = [];
+
+    foreach ($notas as $fatura) {
+      $rotulo = 'fatura #' . (int) $fatura->id;
+
+      try {
+        $r = $this->invoice_model->enviarNota($fatura, $idUser);
+      } catch (Throwable $e) {
+        $r = ['success' => FALSE, 'message' => $e->getMessage()];
+      }
+
+      if (empty($r['success'])) {
+        $falhas++;
+        $mensagensDeErro[] = $rotulo . ': ' . $r['message'];
+        echo "  [ERRO] {$rotulo}: {$r['message']}" . PHP_EOL;
+        continue;
+      }
+
+      $enviadas++;
+      echo "  [OK]   {$rotulo}: {$r['message']}" . PHP_EOL;
+    }
+
+    $this->global_model->edit('crm_cron_logs', [
+      'modified' => date('Y-m-d H:i:s'),
+      'errors' => empty($mensagensDeErro) ? NULL : mb_substr(implode(' | ', $mensagensDeErro), 0, 5000),
+    ], 'name', 'cron_enviar_notas');
+
+    $this->destravar($lockHandle);
+
+    echo "Concluído: {$enviadas} enfileirada(s), {$falhas} com erro." . PHP_EOL;
+  }
+  /**
    * Avisa e aplica os reajustes anuais.
    *
    * Duas fases na mesma rotina: primeiro os avisos (contratos que entram na
