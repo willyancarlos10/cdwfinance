@@ -14,7 +14,7 @@ defined('BASEPATH') or exit('No direct script access allowed');
 ### Migration ###
 $config['migration_enabled'] = TRUE;
 $config['migration_path'] = APPPATH.'migrations/';
-$config['migration_version'] = 40;
+$config['migration_version'] = 41;
 $config['migration_table'] = 'migrations';
 // TRUE: o próprio CI3 roda latest() ao carregar a library (que é autoloaded),
 // então subir o arquivo da migration é o bastante para ela aplicar no deploy.

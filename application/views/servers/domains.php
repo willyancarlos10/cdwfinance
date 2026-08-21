@@ -4,6 +4,7 @@ $badgeTipo = [
   'whm' => 'bg-secondary',
   'directadmin' => 'bg-primary',
   'cloudpanel' => 'bg-info',
+  'carbonio' => 'bg-success',
   'manual' => 'bg-dark',
 ];
 

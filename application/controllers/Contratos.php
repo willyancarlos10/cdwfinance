@@ -1025,10 +1025,10 @@ class Contratos extends MY_Controller
    *
    * O desvínculo é por conta, e não do contrato inteiro: se numa tentativa
    * anterior parte das contas caiu, a repetição da operação passa por elas de
-   * novo (o CloudPanel responde "já estava nesse estado" como sucesso; WHM e
-   * DirectAdmin aceitam a suspensão repetida) e o desvínculo só acontece
-   * quando tudo passa. REABRIR não reativa
-   * nada, justamente porque o vínculo das contas já aplicadas não existe mais —
+   * novo (CloudPanel e Carbonio respondem "já estava nesse estado" como
+   * sucesso; WHM e DirectAdmin aceitam a suspensão repetida) e o desvínculo só
+   * acontece quando tudo passa. REABRIR não reativa nada, justamente porque o
+   * vínculo das contas já aplicadas não existe mais —
    * encerramento é caminho de ida para o serviço, e cliente que volta gera
    * contrato novo.
    */

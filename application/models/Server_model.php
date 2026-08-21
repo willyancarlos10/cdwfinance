@@ -3,18 +3,21 @@
 defined('BASEPATH') or exit('No direct script access allowed');
 
 /**
- * Regras dos servidores de hospedagem: teste de conexão e sincronização dos
- * domínios. O controller e o cron só chamam este model.
+ * Regras dos servidores: teste de conexão e sincronização dos domínios. O
+ * controller e o cron só chamam este model.
  *
- * As três integrações (Server_whm, Server_directadmin, Server_cloudpanel) têm a
- * mesma interface — test($config) e listDomains($config) — e são escolhidas por
- * `type`. Toda credencial trafega cifrada no banco e só é decifrada aqui, na
- * hora de montar a conexão.
+ * As integrações (Server_whm, Server_directadmin, Server_cloudpanel e
+ * Server_carbonio) têm a mesma interface — test($config) e listDomains($config)
+ * — e são escolhidas por `type`. Toda credencial trafega cifrada no banco e só
+ * é decifrada aqui, na hora de montar a conexão.
+ *
+ * O Carbonio é servidor de E-MAIL, não de site: entra só para trazer os
+ * domínios e para parar/retomar o serviço deles junto com o contrato.
  */
 class Server_model extends CI_Model
 {
     /** Tipos aceitos no cadastro e na sincronização. */
-    const TYPES = ['whm', 'directadmin', 'cloudpanel'];
+    const TYPES = ['whm', 'directadmin', 'cloudpanel', 'carbonio'];
 
     /**
      * Teto de tempo, em segundos, do laço que suspende as contas de um
@@ -58,6 +61,7 @@ class Server_model extends CI_Model
             'whm' => 'WHM / cPanel',
             'directadmin' => 'DirectAdmin',
             'cloudpanel' => 'CloudPanel',
+            'carbonio' => 'Carbonio (e-mail)',
         ];
         return isset($rotulos[$type]) ? $rotulos[$type] : (string) $type;
     }
@@ -123,6 +127,9 @@ class Server_model extends CI_Model
             case 'cloudpanel':
                 $this->load->library('server_cloudpanel');
                 return $this->server_cloudpanel;
+            case 'carbonio':
+                $this->load->library('server_carbonio');
+                return $this->server_carbonio;
         }
         return FALSE;
     }
@@ -322,16 +329,19 @@ class Server_model extends CI_Model
      */
     private function upsertDomain($idServer, $idCompany, $dominio, $item, $agora, $idUser)
     {
-        // Sempre presentes na coleta dos três painéis.
+        // Sempre presentes na coleta de todos os painéis.
         $colunas = [
             'owner_username' => isset($item['owner_username']) ? $item['owner_username'] : NULL,
-            'disk_used_mb' => isset($item['disk_used_mb']) ? $item['disk_used_mb'] : NULL,
             'status' => isset($item['status']) ? $item['status'] : 'ativo',
             'source' => isset($item['source']) ? $item['source'] : 'manual',
         ];
 
-        // Opcionais: só entram quando a origem realmente informou.
-        foreach (['plan', 'disk_limit_mb', 'ip', 'contact_email', 'suspension_reason'] as $opcional) {
+        // Opcionais: só entram quando a origem realmente informou. O
+        // `disk_used_mb` está aqui — e não no bloco acima — porque no Carbonio
+        // ele vem de uma chamada à parte da que lista os domínios: se só ela
+        // falhar, gravar NULL zeraria o disco de todos os domínios do servidor
+        // e derrubaria a barra de uso dos contratos sem nada ter mudado.
+        foreach (['disk_used_mb', 'plan', 'disk_limit_mb', 'ip', 'contact_email', 'suspension_reason'] as $opcional) {
             if (array_key_exists($opcional, $item)) {
                 $colunas[$opcional] = $item[$opcional];
             }
@@ -476,7 +486,9 @@ class Server_model extends CI_Model
             }
 
             $tipo = mb_strtolower((string) $linha->server_type);
-            $porDominio = ($tipo === 'cloudpanel');
+            // CloudPanel age por vhost e o Carbonio, por domínio de e-mail
+            // (zimbraDomainStatus). WHM e DirectAdmin derrubam a conta inteira.
+            $porDominio = in_array($tipo, ['cloudpanel', 'carbonio'], TRUE);
             $conta = trim((string) $linha->owner_username);
 
             if (!in_array($tipo, self::TYPES, TRUE)) {

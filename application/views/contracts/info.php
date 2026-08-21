@@ -951,7 +951,8 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
                 <div class="alert-message">
                   <i class="mdi mdi-server-off"></i>
                   <strong><?php echo (int) $dominios_com_vinculo; ?> domínio(s) vinculado(s)</strong> terão a conta
-                  <strong>suspensa nos painéis</strong> (WHM/DirectAdmin suspendem a conta inteira; CloudPanel, o site) e,
+                  <strong>suspensa nos painéis</strong> (WHM/DirectAdmin suspendem a conta inteira; CloudPanel, o site;
+                  Carbonio, o domínio de e-mail inteiro, retendo as mensagens que chegarem) e,
                   em seguida, serão <strong>desvinculados</strong> — a conta fica órfã, sem contrato.
                   <br><small>
                     Reabrir o contrato depois <strong>não</strong> reativa as contas nem refaz o vínculo. Conta

@@ -4,6 +4,8 @@ $tipoAtual = $edicao ? $result->type : set_value('server[type]', 'whm');
 $tipoAtual = set_value('server[type]', $tipoAtual);
 $authAtual = $edicao && !empty($result->auth_type) ? $result->auth_type : 'password';
 $authAtual = set_value('server[auth_type]', $authAtual);
+// No Carbonio a porta é opcional (em branco = 6071); no CloudPanel é obrigatória.
+$portaPadrao = ($tipoAtual === 'carbonio') ? '' : 22;
 $verificaSsl = $edicao ? !empty($result->verify_ssl) : TRUE;
 if ($this->input->method() === 'post') {
   $verificaSsl = (bool) $this->input->post('server[verify_ssl]');
@@ -83,11 +85,12 @@ if ($this->input->method() === 'post') {
             <div class="form-text" id="help_host"></div>
           </div>
         </div>
-        <div class="col-md-3 js-only-cloudpanel">
+        <div class="col-md-3 js-campo-porta">
           <div class="form-group mb-3">
-            <label class="form-label">* Porta SSH</label>
-            <input type="number" class="form-control" name="server[port]" min="1" max="65535"
-              value="<?php echo set_value('server[port]', ($edicao && !empty($result->port)) ? (int) $result->port : 22); ?>">
+            <label class="form-label"><span id="label_porta_obrigatoria">* </span><span id="label_porta">Porta SSH</span></label>
+            <input type="number" class="form-control" name="server[port]" id="server_port" min="1" max="65535"
+              value="<?php echo set_value('server[port]', ($edicao && !empty($result->port)) ? (int) $result->port : $portaPadrao); ?>">
+            <div class="form-text" id="help_porta"></div>
           </div>
         </div>
         <div class="col-md-3">
@@ -147,7 +150,7 @@ if ($this->input->method() === 'post') {
               <input class="form-check-input" type="checkbox" role="switch" id="verify_ssl" name="server[verify_ssl]" value="1" <?php echo $verificaSsl ? 'checked' : ''; ?>>
               <label class="form-check-label" for="verify_ssl">Verificar certificado SSL</label>
             </div>
-            <div class="form-text">Desmarque quando o painel usa certificado auto-assinado — é o caso mais comum em WHM e DirectAdmin.</div>
+            <div class="form-text">Desmarque quando o painel usa certificado auto-assinado — é o caso mais comum em WHM, DirectAdmin e na porta administrativa do Carbonio.</div>
           </div>
         </div>
       </div>
@@ -240,20 +243,64 @@ if ($this->input->method() === 'post') {
         secret_key: 'Chave privada SSH',
         secret_help_password: 'O usuário precisa conseguir ler /home de todos os sites (na prática, root).',
         secret_help_key: 'Cole o conteúdo completo da chave privada. Chave com passphrase não é suportada.'
+      },
+      carbonio: {
+        host: 'Endereço do Carbonio',
+        host_help: 'Hostname ou IP do servidor de e-mail. Prefixe com http:// apenas para forçar HTTP puro na porta da API.',
+        username: 'Administrador',
+        secret: 'Senha',
+        secret_help: 'Use um administrador do Carbonio (global ou delegado do domínio), informado como endereço completo.'
       }
     };
 
+    // Portas padrão dos painéis que expõem o campo. Trocar de tipo só reescreve
+    // a porta quando ela é o padrão do outro painel — porta digitada à mão fica.
+    var PORTAS = { cloudpanel: 22, carbonio: 6071 };
+
     var $tipo = $('#server_type');
     var $auth = $('#server_auth_type');
+    var $porta = $('#server_port');
+
+    function aplicarPorta(tipo) {
+      var ehCloudPanel = (tipo === 'cloudpanel');
+      var atual = $.trim($porta.val());
+      var ehPadraoDeOutro = false;
+
+      $.each(PORTAS, function(alias, valor) {
+        if (alias !== tipo && atual === String(valor)) {
+          ehPadraoDeOutro = true;
+        }
+      });
+
+      if (atual === '' || ehPadraoDeOutro) {
+        // O CloudPanel exige a porta; no Carbonio, em branco significa 6071.
+        $porta.val(ehCloudPanel ? PORTAS.cloudpanel : '');
+      }
+
+      $porta.attr('placeholder', PORTAS[tipo] || '');
+      $porta.prop('required', ehCloudPanel);
+
+      $('#label_porta').text(ehCloudPanel ? 'Porta SSH' : 'Porta da API');
+      $('#label_porta_obrigatoria').toggle(ehCloudPanel);
+      $('#help_porta').text(ehCloudPanel ? '' : 'Em branco usa a padrão do Carbonio (6071).');
+    }
 
     function aplicarTipo() {
       var tipo = $tipo.val();
       var textos = TEXTOS[tipo] || TEXTOS.whm;
       var ehCloudPanel = (tipo === 'cloudpanel');
+      var ehCarbonio = (tipo === 'carbonio');
       var usaChave = ehCloudPanel && $auth.val() === 'key';
 
       $('.js-only-cloudpanel').toggle(ehCloudPanel);
+      // A caixa de verificação de certificado vale para todo painel HTTP —
+      // inclusive o Carbonio, cuja API administrativa costuma usar certificado
+      // auto-assinado. Só o CloudPanel fica de fora, porque é SSH.
       $('.js-only-http').toggle(!ehCloudPanel);
+      // A porta só é configurável onde não é fixa: SSH no CloudPanel e API
+      // administrativa no Carbonio. WHM (2087) e DirectAdmin (no endereço) não.
+      $('.js-campo-porta').toggle(ehCloudPanel || ehCarbonio);
+      aplicarPorta(tipo);
 
       $('#label_host').text(textos.host);
       $('#help_host').text(textos.host_help);

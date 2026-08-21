@@ -4,6 +4,7 @@ $badgeTipo = [
   'whm' => 'bg-secondary',
   'directadmin' => 'bg-primary',
   'cloudpanel' => 'bg-info',
+  'carbonio' => 'bg-success',
 ];
 ?>
 <div class="row mb-2 mb-xl-2">
@@ -85,7 +86,7 @@ $badgeTipo = [
                 </td>
                 <td>
                   <a href="<?php echo base_url('servidores/editar?id=' . (int) $row->id); ?>"><?php echo htmlspecialchars($row->name, ENT_QUOTES, 'UTF-8'); ?></a><br />
-                  <small class="text-muted"><?php echo htmlspecialchars($row->username, ENT_QUOTES, 'UTF-8'); ?>@<?php echo htmlspecialchars($row->host, ENT_QUOTES, 'UTF-8'); ?><?php if ($row->type === 'cloudpanel' && !empty($row->port)) echo ':' . (int) $row->port; ?></small>
+                  <small class="text-muted"><?php echo htmlspecialchars($row->username, ENT_QUOTES, 'UTF-8'); ?>@<?php echo htmlspecialchars($row->host, ENT_QUOTES, 'UTF-8'); ?><?php if (in_array($row->type, ['cloudpanel', 'carbonio'], TRUE) && !empty($row->port)) echo ':' . (int) $row->port; ?></small>
                 </td>
                 <td align="center">
                   <span class="badge <?php echo isset($badgeTipo[$row->type]) ? $badgeTipo[$row->type] : 'bg-dark'; ?>"><?php echo isset($server_types[$row->type]) ? $server_types[$row->type] : $row->type; ?></span>

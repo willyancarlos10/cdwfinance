@@ -872,6 +872,19 @@ class Servidores extends MY_Controller
       $dados['auth_type'] = $auth;
       // CloudPanel é SSH: a verificação de certificado TLS não se aplica.
       $dados['verify_ssl'] = 0;
+    } elseif ($tipo === 'carbonio') {
+      // A API administrativa do Carbonio atende numa porta própria (6071 por
+      // padrão), mas ela é HTTP: a porta é opcional — em branco, a library usa
+      // o padrão — e a verificação de certificado continua valendo.
+      $porta = isset($post['port']) ? (int) $post['port'] : 0;
+      if ($porta !== 0 && ($porta < 1 || $porta > 65535)) {
+        $this->session->set_flashdata('warning', 'Informe uma porta entre 1 e 65535, ou deixe em branco para usar a padrão (6071).');
+        return FALSE;
+      }
+
+      $dados['port'] = ($porta > 0) ? $porta : NULL;
+      $dados['auth_type'] = NULL;
+      $dados['verify_ssl'] = !empty($post['verify_ssl']) ? 1 : 0;
     } else {
       $dados['port'] = NULL;
       $dados['auth_type'] = NULL;

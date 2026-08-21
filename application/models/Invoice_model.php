@@ -1153,8 +1153,20 @@ class Invoice_model extends CI_Model
             // cobrança mensal é ruído que esconde as poucas de fato parceladas.
             '{parcela}' => ($total > 1) ? ((int) $fatura->installment_number . '/' . $total) : '',
             '{descricao}' => (string) $fatura->description,
-            '{linha_digitavel}' => (string) $fatura->linha_digitavel,
-            '{pix_copia_cola}' => (string) $fatura->link_pix,
+            // Coluna que a consulta de origem não trouxe vira marcador VAZIO,
+            // e não Notice no log: as duas filas que passam por aqui carregam
+            // recortes diferentes da mesma view. A da etapa B seleciona a
+            // linha digitável e o PIX (o boleto é o assunto do e-mail); a da
+            // etapa F, não — e de propósito, porque ali a fatura já foi paga
+            // (`pos_compensacao` só enfileira nota na baixa) e a cobrança
+            // continua gravada na linha, viva e pagável. Selecioná-la para
+            // este mapa mandaria um boleto legítimo dentro do e-mail de uma
+            // nota fiscal já quitada, convidando o cliente a pagar de novo.
+            // É o que a tela de Parâmetros gerais já promete ao oferecer os
+            // mesmos marcadores nas duas abas: "os que não fizerem sentido
+            // aqui saem vazios".
+            '{linha_digitavel}' => (string) ($fatura->linha_digitavel ?? ''),
+            '{pix_copia_cola}' => (string) ($fatura->link_pix ?? ''),
             '{empresa}' => (string) (empty($empresa) ? '' : ($empresa->byname ?: $empresa->name)),
         ];
     }
