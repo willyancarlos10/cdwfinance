@@ -4,19 +4,22 @@ info:
   title: CDW Finance — API pública
   version: 1.0.0
   description: |
-    API pública do CDW Finance, versionada sob `/api/v1`.
+    API pública de **consulta** do CDW Finance, versionada sob `/api/v1`.
 
-    **Ainda não há operações publicadas.** Esta especificação documenta o
-    contrato que toda operação futura deve seguir — autenticação, envelope de
-    resposta, paginação e códigos HTTP — e serve de referência para o primeiro
-    endpoint do financeiro.
+    Expõe os dados de gestão da empresa vinculada à chave: clientes, contratos,
+    contatos, anexos, servidores e domínios. **Todas as operações são somente
+    leitura** — não há escrita nesta versão.
+
+    Os mesmos dados estão disponíveis por **MCP** (Model Context Protocol), para
+    agentes de IA, em `POST /api/v1/mcp`. As permissões e o formato de cada
+    entidade são idênticos nos dois caminhos. Instruções em `/mcp/docs`.
 
     ### Autenticação
 
     Toda requisição exige uma chave de API no cabeçalho:
 
     ```
-    Authorization: Bearer gcms_live_<prefixo>_<segredo>
+    Authorization: Bearer cdwf_live_<prefixo>_<segredo>
     ```
 
     As chaves são geradas por empresa no painel, em **Empresas › Chaves de API**.
@@ -25,12 +28,37 @@ info:
     qualquer momento.
 
     **O escopo por empresa é derivado da chave no servidor.** Nenhuma operação
-    aceita `id_company` por query, corpo ou rota.
+    aceita `id_company` por query, corpo ou rota. Consultar um recurso de outra
+    empresa devolve `404`, e não `403` — um `403` confirmaria que aquele
+    registro existe.
+
+    Use a chave sempre a partir do servidor: não há CORS, e expô-la no
+    JavaScript de um navegador entregaria acesso a toda a base do tenant.
+
+    ### Paginação
+
+    As listagens aceitam `page` (a partir de 1) e `limit` (de 1 a 100, padrão
+    20), e devolvem `meta` com `page`, `limit` e `total`. As operações de
+    detalhe não trazem `meta`.
 
     ### Limite de requisições
 
-    As chamadas são limitadas por chave. Ao estourar o limite a resposta é
+    120 requisições por minuto, por chave. Ao estourar o limite a resposta é
     `429`, acompanhada do cabeçalho `Retry-After` com os segundos de espera.
+    Não há cabeçalhos `X-RateLimit-*`.
+
+    ### Os dois cadastros de domínio
+
+    Há duas operações de domínio porque há dois cadastros distintos, e escolher
+    o errado devolve a resposta errada sem erro nenhum:
+
+    - **`/contract-domains`** — o cadastro **comercial**: uma linha por domínio
+      contratado, com o vencimento *cadastrado* (`due_date`), registrador e se
+      é gerenciado pela CDW.
+    - **`/server-domains`** — o **inventário**: uma linha por conta de
+      hospedagem num servidor, com disco, plano, IP e o retrato de WHOIS
+      (incluindo o vencimento *observado no registro*). O mesmo domínio pode
+      ter duas contas — site num painel e e-mail em outro.
 
 servers:
   - url: /api/v1
@@ -40,13 +68,553 @@ security:
   - bearerAuth: []
 
 tags:
-  - name: Financeiro
-    description: |
-      Operações do financeiro. Nenhuma publicada até o momento — ao criar a
-      primeira, documente-a aqui e registre a rota acima do catch-all em
-      `application/config/routes.php`.
+  - name: Empresa
+    description: A empresa (tenant) vinculada à chave.
+  - name: Clientes
+    description: Clientes finais do tenant, com seus contatos e anexos.
+  - name: Contratos
+    description: Contratos, tipos de serviço e domínios contratados.
+  - name: Infraestrutura
+    description: Servidores e contas de hospedagem.
+  - name: Catálogos
+    description: Listas globais, compartilhadas por todos os tenants.
 
-paths: {}
+paths:
+  /companies:
+    get:
+      tags: [Empresa]
+      summary: Consulta a empresa vinculada à chave
+      description: |
+        Requer o escopo `companies:read`. É uma listagem paginada que, por
+        construção, devolve **um único item**: a empresa dona da chave. O
+        formato é de listagem para o consumidor não precisar tratar dois
+        formatos de resposta.
+      operationId: listCompanies
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Consulta realizada.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Empresa' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '403': { $ref: '#/components/responses/SemPermissao' }
+        '422': { $ref: '#/components/responses/NaoProcessavel' }
+        '429': { $ref: '#/components/responses/LimiteExcedido' }
+
+  /companies/{id}:
+    get:
+      tags: [Empresa]
+      summary: Consulta a empresa por ID
+      description: |
+        Requer o escopo `companies:read`. Só o ID da própria empresa da chave
+        devolve resultado; qualquer outro responde `404`.
+      operationId: getCompany
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Consulta realizada.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Empresa' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '403': { $ref: '#/components/responses/SemPermissao' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+        '422': { $ref: '#/components/responses/NaoProcessavel' }
+        '429': { $ref: '#/components/responses/LimiteExcedido' }
+
+  /customers:
+    get:
+      tags: [Clientes]
+      summary: Lista os clientes finais
+      description: |
+        Requer o escopo `customers:read`. Ordenado pelo cadastro mais recente,
+        a mesma ordem da listagem do painel.
+
+        Os dados do representante legal e do contato financeiro **não são
+        expostos**. Para contatos, use `/contacts`.
+      operationId: listCustomers
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+        - name: search
+          in: query
+          description: Busca parcial, sem distinção de maiúsculas, em nome, nome fantasia e e-mail.
+          schema: { type: string, maxLength: 100 }
+        - name: document
+          in: query
+          description: CPF ou CNPJ. A pontuação é ignorada.
+          schema: { type: string, maxLength: 20 }
+        - name: type
+          in: query
+          description: '`F` = pessoa física, `J` = pessoa jurídica.'
+          schema: { type: string, enum: [F, J] }
+        - name: has_active_contract
+          in: query
+          description: '`1` traz só quem tem contrato vigente; `0`, só quem não tem.'
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: Consulta realizada.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Cliente' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '403': { $ref: '#/components/responses/SemPermissao' }
+        '422': { $ref: '#/components/responses/NaoProcessavel' }
+        '429': { $ref: '#/components/responses/LimiteExcedido' }
+
+  /customers/{id}:
+    get:
+      tags: [Clientes]
+      summary: Consulta um cliente por ID
+      description: Requer o escopo `customers:read`. Cliente de outra empresa responde `404`.
+      operationId: getCustomer
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Consulta realizada.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Cliente' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '403': { $ref: '#/components/responses/SemPermissao' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+        '422': { $ref: '#/components/responses/NaoProcessavel' }
+        '429': { $ref: '#/components/responses/LimiteExcedido' }
+
+  /contacts:
+    get:
+      tags: [Clientes]
+      summary: Lista os contatos dos clientes
+      description: |
+        Requer o escopo `contacts:read`. Sem `customer_id`, devolve os contatos
+        de todos os clientes do tenant — o que permite responder "de quem é
+        este e-mail?" sem saber o cliente de antemão.
+      operationId: listContacts
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+        - name: customer_id
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [financeiro, socio_proprietario, gestor_trafego, juridico, marketing, diretor, outros]
+      responses:
+        '200':
+          description: Consulta realizada.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Contato' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '403': { $ref: '#/components/responses/SemPermissao' }
+        '422': { $ref: '#/components/responses/NaoProcessavel' }
+        '429': { $ref: '#/components/responses/LimiteExcedido' }
+
+  /attachments:
+    get:
+      tags: [Clientes]
+      summary: Lista os anexos dos clientes
+      description: |
+        Requer o escopo `attachments:read`. Devolve **apenas metadados** —
+        nome, extensão, data e autor. O arquivo em si não é servido pela API e
+        não há URL de download.
+      operationId: listAttachments
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+        - name: customer_id
+          in: query
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: Consulta realizada.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Anexo' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '403': { $ref: '#/components/responses/SemPermissao' }
+        '422': { $ref: '#/components/responses/NaoProcessavel' }
+        '429': { $ref: '#/components/responses/LimiteExcedido' }
+
+  /contracts:
+    get:
+      tags: [Contratos]
+      summary: Lista os contratos
+      description: |
+        Requer o escopo `contracts:read`. Cada contrato traz os tipos de
+        serviço vinculados. Os **domínios não vêm na listagem** — use
+        `/contracts/{id}` ou `/contract-domains`.
+      operationId: listContracts
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+        - name: customer_id
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [vigente, suspenso, encerrado] }
+        - name: cycle
+          in: query
+          schema: { type: string, enum: [mensal, trimestral, semestral, anual] }
+        - name: billing_source
+          in: query
+          description: Quem emite a cobrança — o ERP Bom Controle ou o próprio CDW Finance.
+          schema: { type: string, enum: [bomcontrole, cdwfinance] }
+      responses:
+        '200':
+          description: Consulta realizada.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Contrato' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '403': { $ref: '#/components/responses/SemPermissao' }
+        '422': { $ref: '#/components/responses/NaoProcessavel' }
+        '429': { $ref: '#/components/responses/LimiteExcedido' }
+
+  /contracts/{id}:
+    get:
+      tags: [Contratos]
+      summary: Consulta a visão geral de um contrato
+      description: |
+        Requer o escopo `contracts:read`. Além dos dados do contrato, devolve
+        os tipos de serviço e os **domínios contratados**, no campo `domains`.
+
+        O bloco de domínios não é paginado e traz no máximo 200 linhas; para
+        listas maiores, use `/contract-domains?contract_id=`.
+
+        ### Títulos
+
+        Com o escopo **`invoices:read`**, a resposta inclui também os dois
+        blocos de título, que vêm de origens diferentes:
+
+        - **`invoices`** — as faturas que o CDW Finance gerou, do banco local.
+          No máximo 200, da mais recente para a mais antiga.
+        - **`bomcontrole_invoices`** — o extrato do ERP Bom Controle,
+          consultado **ao vivo**. Nada de financeiro do ERP é copiado para o
+          banco, para não criar uma segunda verdade sobre faturas que mudam lá.
+
+        O ERP só é consultado quando o contrato está **vinculado** a um
+        contrato de venda de lá; sem vínculo, o bloco volta com
+        `linked: false` e nenhuma chamada de rede acontece. Falha na consulta
+        **não derruba a resposta**: o bloco sai com `available: false` e o
+        motivo, e o resto do contrato é servido normalmente.
+
+        Um contrato normalmente tem só uma das duas origens populadas —
+        `billing.source` diz quem fatura, e é exclusivo. As duas cheias são o
+        retrato de uma transição.
+
+        **Sem o escopo `invoices:read` os dois blocos são omitidos** e a
+        requisição continua respondendo `200`: negá-la inteira tiraria da
+        chave os dados do contrato, que ela pode ver.
+
+        Não confundir `bomcontrole_invoices` (o extrato) com `bomcontrole` (o
+        **vínculo** do contrato com o ERP), que é outro campo e está sempre
+        presente.
+      operationId: getContract
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Consulta realizada.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: '#/components/schemas/Contrato'
+                          - type: object
+                            properties:
+                              domains:
+                                type: array
+                                items: { $ref: '#/components/schemas/DominioContratado' }
+                              invoices:
+                                type: array
+                                description: Faturas geradas pelo CDW Finance. Só com o escopo `invoices:read`.
+                                items: { $ref: '#/components/schemas/Fatura' }
+                              bomcontrole_invoices:
+                                allOf:
+                                  - $ref: '#/components/schemas/ExtratoBomControle'
+                                  - description: Extrato do ERP. Só com o escopo `invoices:read`.
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '403': { $ref: '#/components/responses/SemPermissao' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+        '422': { $ref: '#/components/responses/NaoProcessavel' }
+        '429': { $ref: '#/components/responses/LimiteExcedido' }
+
+  /contract-domains:
+    get:
+      tags: [Contratos]
+      summary: Lista os domínios contratados (cadastro comercial)
+      description: |
+        Requer o escopo `contract-domains:read`.
+
+        Este é o cadastro **comercial**: vencimento *cadastrado* (`due_date`),
+        registrador e se o domínio é gerenciado pela CDW. Para disco, plano ou
+        em qual servidor o domínio está hospedado, use **`/server-domains`**.
+
+        O campo `hosting_account` traz o vínculo com a conta de hospedagem
+        quando existe, e é `null` quando o domínio não está em nenhum servidor
+        do tenant — o que é situação normal, não erro.
+      operationId: listContractDomains
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+        - name: contract_id
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: customer_id
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: domain
+          in: query
+          description: Nome exato do domínio.
+          schema: { type: string }
+        - name: contract_status
+          in: query
+          schema: { type: string, enum: [vigente, suspenso, encerrado] }
+        - name: managed_cdw
+          in: query
+          schema: { type: boolean }
+        - name: due_before
+          in: query
+          description: Vence até esta data, inclusive.
+          schema: { type: string, format: date }
+        - name: due_after
+          in: query
+          description: Vence a partir desta data, inclusive.
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: Consulta realizada.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/DominioContratado' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '403': { $ref: '#/components/responses/SemPermissao' }
+        '422': { $ref: '#/components/responses/NaoProcessavel' }
+        '429': { $ref: '#/components/responses/LimiteExcedido' }
+
+  /servers:
+    get:
+      tags: [Infraestrutura]
+      summary: Lista os servidores
+      description: |
+        Requer o escopo `servers:read`.
+
+        **Endereço, porta e usuário de acesso não são expostos**, nem as
+        mensagens de teste e sincronização — elas podem conter o endereço do
+        painel. O `status` de cada operação responde se ela funcionou.
+      operationId: listServers
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+        - name: type
+          in: query
+          schema: { type: string, enum: [whm, directadmin, cloudpanel, carbonio] }
+        - name: active
+          in: query
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: Consulta realizada.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Servidor' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '403': { $ref: '#/components/responses/SemPermissao' }
+        '422': { $ref: '#/components/responses/NaoProcessavel' }
+        '429': { $ref: '#/components/responses/LimiteExcedido' }
+
+  /servers/{id}:
+    get:
+      tags: [Infraestrutura]
+      summary: Consulta um servidor por ID
+      description: Requer o escopo `servers:read`. Servidor de outra empresa responde `404`.
+      operationId: getServer
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Consulta realizada.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Servidor' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '403': { $ref: '#/components/responses/SemPermissao' }
+        '404': { $ref: '#/components/responses/NaoEncontrado' }
+        '422': { $ref: '#/components/responses/NaoProcessavel' }
+        '429': { $ref: '#/components/responses/LimiteExcedido' }
+
+  /server-domains:
+    get:
+      tags: [Infraestrutura]
+      summary: Lista as contas de hospedagem (inventário)
+      description: |
+        Requer o escopo `server-domains:read`.
+
+        Este é o **inventário**: uma linha por conta de hospedagem num
+        servidor, com disco usado, plano, IP e o retrato de WHOIS — incluindo o
+        vencimento *observado no registro*. Para o vencimento **cadastrado no
+        contrato**, use **`/contract-domains`**.
+
+        O mesmo nome de domínio pode aparecer em mais de uma linha: é comum o
+        site estar num painel e as contas de e-mail em outro, e nesse caso são
+        duas contas, cada uma com seu disco.
+      operationId: listServerDomains
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+        - name: server_id
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: domain
+          in: query
+          description: Nome exato do domínio.
+          schema: { type: string }
+        - name: search
+          in: query
+          description: Busca parcial no nome do domínio.
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string, enum: [ativo, suspenso] }
+        - name: source
+          in: query
+          description: Painel de origem da sincronização.
+          schema: { type: string, enum: [whm, directadmin, cloudpanel, carbonio, manual] }
+        - name: whois_bucket
+          in: query
+          description: |
+            Faixa de vencimento do registro, já calculada:
+            `vencido`, `vence_30` (até 30 dias), `ok`, `livre` (não registrado),
+            `sem_vencimento`, `sem_dados`, `pendente` (ainda não consultado) e
+            `erro`.
+          schema:
+            type: string
+            enum: [pendente, livre, erro, sem_dados, sem_vencimento, vencido, vence_30, ok]
+      responses:
+        '200':
+          description: Consulta realizada.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/ContaHospedagem' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '403': { $ref: '#/components/responses/SemPermissao' }
+        '422': { $ref: '#/components/responses/NaoProcessavel' }
+        '429': { $ref: '#/components/responses/LimiteExcedido' }
+
+  /service-types:
+    get:
+      tags: [Catálogos]
+      summary: Lista os tipos de serviço
+      description: |
+        Requer o escopo `service-types:read`.
+
+        **Catálogo global**: os tipos de serviço não pertencem a uma empresa —
+        o mesmo vocabulário vale para todos os tenants. Por isso esta operação
+        não é filtrada por empresa nem paginada. Serve para traduzir os ids de
+        `service_type_ids` do cliente e de `services` do contrato.
+      operationId: listServiceTypes
+      responses:
+        '200':
+          description: Consulta realizada.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/TipoServico' }
+        '401': { $ref: '#/components/responses/NaoAutenticado' }
+        '403': { $ref: '#/components/responses/SemPermissao' }
+        '429': { $ref: '#/components/responses/LimiteExcedido' }
 
 components:
   securitySchemes:
@@ -55,7 +623,7 @@ components:
       scheme: bearer
       description: |
         Chave opaca gerada no painel (não é JWT), no formato
-        `gcms_live_<prefixo de 12 hex>_<segredo de 43 chars>`.
+        `cdwf_live_<prefixo de 12 hex>_<segredo de 43 chars>`.
 
   schemas:
     Envelope:
@@ -110,7 +678,454 @@ components:
             data:
               example: null
 
+    Endereco:
+      type: object
+      description: |
+        Endereço comercial. `city`, `state` e `uf` podem vir nulos no cliente:
+        a cidade é opcional no cadastro e o registro não some das telas por
+        causa disso.
+      properties:
+        street: { type: string, nullable: true }
+        number: { type: string, nullable: true }
+        complement: { type: string, nullable: true }
+        district: { type: string, nullable: true }
+        zip: { type: string, nullable: true }
+        city: { type: string, nullable: true }
+        state: { type: string, nullable: true }
+        uf: { type: string, nullable: true, example: PR }
+
+    Empresa:
+      type: object
+      description: |
+        O tenant dono da chave. O token do link público de cadastro e a
+        configuração de integração com o ERP não são expostos.
+      properties:
+        id: { type: integer, example: 1 }
+        active: { type: boolean }
+        status: { type: string, example: Publicado }
+        document: { type: string, description: CNPJ, só dígitos., example: '18436107000142' }
+        name: { type: string, example: CDW TECH LTDA }
+        byname: { type: string, example: CDW TECH }
+        alias: { type: string, nullable: true }
+        email: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        owner:
+          type: object
+          properties:
+            name: { type: string, nullable: true }
+            cellphone: { type: string, nullable: true }
+        address: { $ref: '#/components/schemas/Endereco' }
+        last_login: { type: string, nullable: true, format: date-time }
+        created_at: { type: string, nullable: true, format: date-time }
+        updated_at: { type: string, nullable: true, format: date-time }
+
+    Cliente:
+      type: object
+      description: |
+        Cliente final do tenant. Os dados do representante legal (RG, CPF,
+        endereço residencial), o contato financeiro do cadastro, o aceite de
+        LGPD e a procedência interna **não são expostos**.
+      properties:
+        id: { type: integer, example: 1059 }
+        type: { type: string, enum: [F, J] }
+        type_label: { type: string, example: Pessoa jurídica }
+        document: { type: string, description: CPF ou CNPJ, só dígitos. }
+        name: { type: string }
+        byname: { type: string, nullable: true, description: Nome fantasia. }
+        state_registration: { type: string, description: 'Inscrição estadual; `ISENTO` quando não há.' }
+        email: { type: string, nullable: true }
+        address: { $ref: '#/components/schemas/Endereco' }
+        declared_domains:
+          type: object
+          description: Domínios informados pelo cliente no cadastro — não é o cadastro de domínios do contrato.
+          properties:
+            primary: { type: string, nullable: true }
+            secondary: { type: string, nullable: true }
+        contract_notes: { type: string, nullable: true }
+        contracts_count: { type: integer }
+        active_contracts_count: { type: integer, description: Contratos com status `vigente`. }
+        service_type_ids:
+          type: array
+          description: Ids dos tipos de serviço já contratados, de contratos de qualquer situação. Traduza em `/service-types`.
+          items: { type: integer }
+        created_at: { type: string, nullable: true, format: date-time }
+        updated_at: { type: string, nullable: true, format: date-time }
+
+    Contato:
+      type: object
+      properties:
+        id: { type: integer }
+        customer_id: { type: integer }
+        type:
+          type: string
+          enum: [financeiro, socio_proprietario, gestor_trafego, juridico, marketing, diretor, outros]
+        type_label: { type: string, example: Financeiro }
+        name: { type: string }
+        email: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        created_at: { type: string, nullable: true, format: date-time }
+        updated_at: { type: string, nullable: true, format: date-time }
+
+    Anexo:
+      type: object
+      description: Metadados do anexo. O arquivo não é servido pela API e não há `updated_at` — a origem não guarda data de alteração.
+      properties:
+        id: { type: integer }
+        customer_id: { type: integer }
+        name: { type: string }
+        extension: { type: string, nullable: true, example: pdf }
+        created_at: { type: string, nullable: true, format: date-time }
+        created_by_name: { type: string, nullable: true }
+
+    Contrato:
+      type: object
+      description: |
+        Contrato do cliente. A lista de destinatários de aviso
+        (`notification_config`) não é exposta.
+      properties:
+        id: { type: integer }
+        customer:
+          type: object
+          properties:
+            id: { type: integer }
+            name: { type: string }
+            byname: { type: string, nullable: true }
+        status: { type: string, enum: [vigente, suspenso, encerrado] }
+        cycle: { type: string, enum: [mensal, trimestral, semestral, anual] }
+        cycle_label: { type: string, example: Mensal }
+        value:
+          type: string
+          description: |
+            Valor do ciclo, como decimal em **string** (ex.: `"349.90"`).
+            Vai como texto de propósito: converter para número de ponto
+            flutuante perderia precisão de centavo.
+          example: '349.90'
+        space_gb: { type: number, nullable: true, description: Espaço contratado, em GB. }
+        comments: { type: string, nullable: true }
+        services:
+          type: array
+          description: Tipos de serviço vinculados ao contrato.
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              name: { type: string }
+        billing:
+          type: object
+          description: Configuração de faturamento.
+          properties:
+            source:
+              type: string
+              enum: [bomcontrole, cdwfinance]
+              description: Quem emite a cobrança — o ERP ou o próprio CDW Finance.
+            day: { type: integer, description: 'Dia do vencimento (1 a 31); `0` = não configurado.' }
+            next_competence: { type: string, nullable: true, format: date }
+            installments: { type: integer }
+            invoice_policy: { type: string, nullable: true, enum: [nao_emitir, com_boleto, pos_compensacao] }
+            adjustment_index: { type: string, nullable: true, enum: [nenhum, igpm, ipca, icti] }
+            next_adjustment: { type: string, nullable: true, format: date }
+        bomcontrole:
+          type: object
+          description: Vínculo com o contrato de venda no ERP.
+          properties:
+            linked: { type: boolean }
+            contract_id: { type: integer, nullable: true }
+            linked_at: { type: string, nullable: true, format: date-time }
+            service_name: { type: string, nullable: true }
+        ended:
+          type: object
+          nullable: true
+          description: Preenchido apenas em contrato encerrado; `null` nos demais.
+          properties:
+            at: { type: string, format: date-time }
+            reason: { type: string, description: Slug do motivo de cancelamento. }
+            comments: { type: string, nullable: true }
+            by_name: { type: string, nullable: true }
+        created_at: { type: string, nullable: true, format: date-time }
+        updated_at: { type: string, nullable: true, format: date-time }
+
+    DominioContratado:
+      type: object
+      description: |
+        Cadastro **comercial** do domínio. Para disco e servidor, veja
+        `ContaHospedagem` em `/server-domains`.
+      properties:
+        id: { type: integer }
+        contract:
+          type: object
+          properties:
+            id: { type: integer }
+            status: { type: string, enum: [vigente, suspenso, encerrado] }
+            cycle: { type: string }
+        customer_id: { type: integer }
+        domain: { type: string }
+        due_date:
+          type: string
+          nullable: true
+          format: date
+          description: Vencimento **cadastrado** do registro. O observado no WHOIS fica em `/server-domains`.
+        registrar: { type: string, nullable: true }
+        managed_cdw: { type: boolean }
+        comments: { type: string, nullable: true }
+        hosting_account:
+          type: object
+          nullable: true
+          description: Conta de hospedagem vinculada. `null` quando o domínio não está em nenhum servidor do tenant.
+          properties:
+            id: { type: integer }
+            domain: { type: string }
+            status: { type: string }
+            disk_used_mb: { type: number, nullable: true }
+            server:
+              type: object
+              properties:
+                name: { type: string }
+                type: { type: string }
+        created_at: { type: string, nullable: true, format: date-time }
+        updated_at: { type: string, nullable: true, format: date-time }
+
+    Servidor:
+      type: object
+      description: |
+        Servidor de hospedagem ou de e-mail. Endereço, porta, usuário e as
+        mensagens de teste/sincronização não são expostos.
+      properties:
+        id: { type: integer }
+        name: { type: string, example: WHM }
+        type: { type: string, enum: [whm, directadmin, cloudpanel, carbonio] }
+        active: { type: boolean }
+        domains_count: { type: integer, description: Contas de hospedagem neste servidor. }
+        last_test:
+          type: object
+          properties:
+            at: { type: string, nullable: true, format: date-time }
+            status: { type: string, nullable: true, example: conectado }
+            ms: { type: integer, nullable: true, description: Tempo de resposta do teste. }
+        last_sync:
+          type: object
+          properties:
+            at: { type: string, nullable: true, format: date-time }
+            status: { type: string, nullable: true, example: sucesso }
+        created_at: { type: string, nullable: true, format: date-time }
+        updated_at: { type: string, nullable: true, format: date-time }
+
+    ContaHospedagem:
+      type: object
+      description: |
+        Uma conta de hospedagem num servidor — o **inventário**. O mesmo nome
+        de domínio pode ter mais de uma conta (site num painel, e-mail em
+        outro), e cada uma tem seu próprio disco.
+      properties:
+        id: { type: integer }
+        domain: { type: string }
+        server:
+          type: object
+          properties:
+            id: { type: integer }
+            name: { type: string }
+            type: { type: string, enum: [whm, directadmin, cloudpanel, carbonio] }
+        owner_username:
+          type: string
+          nullable: true
+          description: 'Conta do cliente no painel (ex.: usuário cPanel). Não é a credencial administrativa do servidor.'
+        plan: { type: string, nullable: true }
+        ip: { type: string, nullable: true }
+        disk:
+          type: object
+          properties:
+            used_mb: { type: number, nullable: true }
+            limit_mb: { type: number, nullable: true, description: '`0` ou nulo significa ilimitado.' }
+            usage_percent: { type: number, nullable: true, description: Nulo quando não há limite definido. }
+        status: { type: string, enum: [ativo, suspenso] }
+        suspension_reason: { type: string, nullable: true }
+        source: { type: string, enum: [whm, directadmin, cloudpanel, carbonio, manual] }
+        contact_email: { type: string, nullable: true }
+        whois:
+          type: object
+          description: Último retrato da consulta ao registro do domínio.
+          properties:
+            expiration_date:
+              type: string
+              nullable: true
+              format: date
+              description: Vencimento **observado no registro**. O cadastrado no contrato fica em `/contract-domains`.
+            registrar: { type: string, nullable: true }
+            nameservers:
+              type: array
+              items: { type: string }
+            status: { type: string, nullable: true }
+            message: { type: string, nullable: true }
+            last_check_at: { type: string, nullable: true, format: date-time }
+            bucket:
+              type: string
+              enum: [pendente, livre, erro, sem_dados, sem_vencimento, vencido, vence_30, ok]
+              description: Faixa de vencimento já calculada, para não precisar comparar datas.
+            ns_changed_at: { type: string, nullable: true, format: date-time }
+        last_sync:
+          type: object
+          properties:
+            at: { type: string, nullable: true, format: date-time }
+            status: { type: string, nullable: true }
+        created_at: { type: string, nullable: true, format: date-time }
+        updated_at: { type: string, nullable: true, format: date-time }
+
+    Fatura:
+      type: object
+      description: |
+        Fatura **gerada pelo CDW Finance**. Não confundir com os títulos do
+        ERP, que ficam em `bomcontrole_invoices`.
+      properties:
+        id: { type: integer }
+        contract_id: { type: integer }
+        customer_id: { type: integer }
+        competence:
+          type: string
+          format: date
+          description: |
+            O período da **obrigação**. Todas as parcelas de uma competência a
+            compartilham; o que as distingue é `installment`.
+        due_date: { type: string, format: date }
+        value:
+          type: string
+          description: Decimal em string, pelo mesmo motivo do valor do contrato.
+          example: '349.90'
+        status: { type: string, enum: [aberta, paga, cancelada] }
+        situation:
+          type: string
+          enum: [a_vencer, vencida, paga, cancelada]
+          description: |
+            Derivada: "vencida" é `due_date` no passado numa fatura aberta.
+            Muda sozinha com o tempo — não é estado que alguém grava.
+        description: { type: string, nullable: true }
+        installment:
+          type: object
+          properties:
+            number: { type: integer }
+            total: { type: integer }
+        charge:
+          type: object
+          nullable: true
+          description: Preenchido só em cobrança avulsa; `null` na recorrência.
+          properties:
+            id: { type: integer }
+            description: { type: string, nullable: true }
+        billing:
+          type: object
+          properties:
+            psp: { type: string, nullable: true, description: Provedor de pagamento que registrou a cobrança. }
+            psp_status: { type: string, nullable: true }
+            registration:
+              type: string
+              enum: [sem_psp, nao_registrada, registrando, registrada]
+              description: |
+                Responde "existe boleto para o cliente pagar?", que é pergunta
+                diferente de `situation` ("ele já pagou?"). `registrando` é
+                estado normal — a emissão é assíncrona.
+            has_boleto: { type: boolean }
+            invoice_policy: { type: string, nullable: true, enum: [nao_emitir, com_boleto, pos_compensacao] }
+            sent_at: { type: string, nullable: true, format: date-time, description: Quando a cobrança foi enviada ao cliente. }
+        payment:
+          type: object
+          nullable: true
+          description: '`null` enquanto não há baixa. Valor e data são os do provedor — o cliente pode ter pago com juros, desconto ou em outra data.'
+          properties:
+            paid_at: { type: string, format: date-time }
+            amount: { type: string }
+            method: { type: string, nullable: true }
+        invoice_document:
+          type: object
+          description: Nota fiscal emitida no ERP para esta fatura.
+          properties:
+            status: { type: string, nullable: true, enum: ['', pendente, venda_criada, emitida, falha] }
+            issued_at: { type: string, nullable: true, format: date-time }
+            sent_at: { type: string, nullable: true, format: date-time }
+            pdf_url: { type: string, nullable: true }
+            xml_url: { type: string, nullable: true }
+        comments: { type: string, nullable: true }
+        created_at: { type: string, nullable: true, format: date-time }
+        updated_at: { type: string, nullable: true, format: date-time }
+
+    ExtratoBomControle:
+      type: object
+      description: |
+        Extrato do contrato no ERP Bom Controle, consultado ao vivo. Sempre
+        verifique `linked` e `available` antes de ler `items`.
+      properties:
+        linked:
+          type: boolean
+          description: |
+            O contrato está vinculado a um contrato de venda no ERP. Quando
+            `false`, **nenhuma chamada de rede é feita** e `items` vem vazio —
+            é estado normal, não falha.
+        available:
+          type: boolean
+          description: |
+            A consulta foi concluída. `false` significa ERP indisponível,
+            integração desativada ou sem chave — e nesse caso o resto da
+            resposta do contrato continua válido.
+        message:
+          type: string
+          nullable: true
+          description: Motivo, quando `linked` ou `available` é `false`.
+        contract:
+          type: object
+          description: O contrato de venda no ERP. Presente apenas quando há vínculo e a consulta funcionou.
+          properties:
+            id: { type: integer, nullable: true }
+            sale_id: { type: integer, nullable: true }
+            closed: { type: boolean }
+            value: { type: number, nullable: true }
+            customer_name: { type: string, nullable: true }
+            linked_at: { type: string, nullable: true, description: Data do vínculo, no formato brasileiro. }
+        warning:
+          type: string
+          description: |
+            Presente quando as faturas pagas vieram pelo caminho alternativo,
+            que filtra por cliente e pode misturar parcelas de outros
+            contratos dele.
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              invoice_id: { type: integer }
+              issue_date: { type: string, nullable: true, format: date }
+              due_date: { type: string, nullable: true, format: date }
+              value: { type: number, nullable: true }
+              status:
+                type: string
+                nullable: true
+                enum: [quitado, vencido, em_aberto]
+                description: Derivado — a API do ERP não tem enum de status; sai de "quitado" mais o vencimento contra hoje.
+              days_overdue: { type: integer, nullable: true }
+              paid: { type: boolean }
+              paid_at: { type: string, nullable: true, format: date }
+              installment: { type: integer, nullable: true }
+              payment_method: { type: string, nullable: true }
+              boleto_url: { type: string, nullable: true }
+              invoice_document_url: { type: string, nullable: true }
+              comments: { type: string, nullable: true }
+
+    TipoServico:
+      type: object
+      description: Item do catálogo global de tipos de serviço.
+      properties:
+        id: { type: integer }
+        name: { type: string, example: Site institucional }
+        active: { type: boolean }
+        monitor_site:
+          type: boolean
+          description: Se contratos deste tipo entram no monitoramento diário de site.
+
   parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      description: Identificador do recurso.
+      schema:
+        type: integer
+        minimum: 1
     page:
       name: page
       in: query

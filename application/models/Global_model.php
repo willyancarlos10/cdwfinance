@@ -118,7 +118,7 @@ class Global_model extends CI_Model
   {
     foreach ($this->session->userdata($filter) as $field => $value) {
       if (!empty($this->session->userdata($filter)[$field])) {
-        if ($field == 'keyword' || $field == 'keyword_search' || $field == 'select2_companies') {
+        if ($field == 'keyword' || $field == 'keyword_search' || $field == 'keyword_ids' || $field == 'select2_companies') {
           if ($field == 'keyword') {
             $key = trim($this->session->userdata($filter)['keyword']);
             $this->db->group_start();
@@ -126,6 +126,21 @@ class Global_model extends CI_Model
             foreach ($this->session->userdata($filter)['keyword_search'] as $c) {
               $this->likeInsensitive($c, $key, TRUE);
             }
+
+            // `keyword_ids` é opcional: uma lista de ids que a tela já resolveu
+            // por conta própria, para a palavra-chave casar também com dado de
+            // OUTRA tabela (na listagem de clientes, o domínio dos contratos)
+            // sem que o Global_model precise conhecer esse relacionamento.
+            //
+            // Entra DENTRO do grupo, como mais um OR: a mesma condição posta
+            // fora viraria AND com os LIKE de nome/documento e a busca por um
+            // domínio — que não casa nenhum campo do cliente — devolveria
+            // sempre vazio. A chave carrega SÓ inteiros (forçados aqui), nunca
+            // SQL vindo do controller.
+            $ids = $this->session->userdata($filter);
+            $ids = (isset($ids['keyword_ids']) && is_array($ids['keyword_ids'])) ? array_map('intval', $ids['keyword_ids']) : [];
+            if (!empty($ids)) $this->db->or_where_in('id', $ids);
+
             $this->db->group_end();
           }
         } elseif ($field == 'modified' || $field == 'created') {

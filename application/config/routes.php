@@ -34,11 +34,40 @@ $route['cadastro-cliente/(:any)'] = 'cadastro_cliente/index/$1';
 $route['api/docs'] = 'api_docs/index';
 $route['api/docs/openapi.yaml'] = 'api_docs/spec';
 //
-// A API v1 não expõe nenhuma operação no momento: os endpoints de conteúdo do
-// CMS (artigos, vagas, leads, mailboxes) foram removidos junto com os módulos.
-// A infraestrutura continua de pé — Api_Controller (core), chaves Bearer por
-// empresa (crm_api_keys) e o rate limiter — então basta criar o controller do
-// recurso e registrar a rota AQUI, ACIMA do catch-all abaixo.
+// Operações de CONSULTA (somente leitura), todas em Api_v1. O caminho usa
+// kebab-case e o método, snake_case. Rota nova entra AQUI, acima do catch-all.
+//
+// Os dois recursos de domínio são nomeados por extenso de propósito: um
+// `/domains` genérico não diria se a resposta é o cadastro comercial
+// (crm_contracts_domains, com vencimento e registrador) ou o inventário de
+// contas de hospedagem (crm_servers_domains, com disco e WHOIS). Quem consome
+// isto são agentes de IA, que escolhem o endpoint lendo o nome.
+$route['api/v1/companies'] = 'api_v1/companies';
+$route['api/v1/companies/(:num)'] = 'api_v1/company/$1';
+$route['api/v1/customers'] = 'api_v1/customers';
+$route['api/v1/customers/(:num)'] = 'api_v1/customer/$1';
+$route['api/v1/contacts'] = 'api_v1/contacts';
+$route['api/v1/attachments'] = 'api_v1/attachments';
+$route['api/v1/contracts'] = 'api_v1/contracts';
+$route['api/v1/contracts/(:num)'] = 'api_v1/contract/$1';
+$route['api/v1/contract-domains'] = 'api_v1/contract_domains';
+$route['api/v1/servers'] = 'api_v1/servers';
+$route['api/v1/servers/(:num)'] = 'api_v1/server/$1';
+$route['api/v1/server-domains'] = 'api_v1/server_domains';
+$route['api/v1/service-types'] = 'api_v1/service_types';
+//
+// Servidor MCP (JSON-RPC 2.0), para agentes de IA. Fica DENTRO de /api/v1 de
+// propósito: o CSRF está ligado e `api/v1/.*` é a única exclusão versionada
+// que o cobre — config.php está no .gitignore, então pôr o MCP em `/mcp`
+// exigiria uma alteração de config que não sobe no deploy (verificado: POST
+// /mcp responde 403). A documentação continua em /mcp/docs, que é GET e não
+// passa por csrf_verify().
+$route['api/v1/mcp'] = 'mcp/index';
+//
+// Fora de /api/v1 porque o catch-all daquele prefixo engoliria — e por ser
+// GET não precisa da exclusão de CSRF. O .htaccess da raiz já tem a
+// RewriteRule para este caminho.
+$route['mcp/docs'] = 'mcp_docs/index';
 //
 // Precisa ser a ÚLTIMA rota de api/v1: o CI3 avalia na ordem e para no primeiro
 // match, então qualquer rota específica nova vai ACIMA desta linha.

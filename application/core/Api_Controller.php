@@ -23,7 +23,9 @@ class Api_Controller extends CI_Controller
     }
 
     $token = trim($matches[1]);
-    if (!preg_match('/^(gcms_live_[a-f0-9]{12})_[A-Za-z0-9_-]{43}$/', $token, $parts)) {
+    // O prefixo tem que casar com Api_key_model::PREFIX. O regex roda ANTES de
+    // tocar o banco: descarta lixo sem pagar uma consulta por requisição.
+    if (!preg_match('/^(cdwf_live_[a-f0-9]{12})_[A-Za-z0-9_-]{43}$/', $token, $parts)) {
       $this->respond(401, FALSE, 'Chave de API inválida.', NULL, ['authorization' => 'Chave de API inválida.']);
     }
 
@@ -45,10 +47,24 @@ class Api_Controller extends CI_Controller
 
   protected function requireScope($scope)
   {
-    $scopes = json_decode($this->api_key->scopes, TRUE);
-    if (!is_array($scopes) || !in_array($scope, $scopes, TRUE)) {
+    if (!$this->hasScope($scope)) {
       $this->respond(403, FALSE, 'Esta chave não possui a permissão necessária.', NULL, ['scope' => 'Escopo obrigatório: ' . $scope]);
     }
+  }
+
+  /**
+   * A chave tem o escopo? Só consulta — não interrompe a requisição.
+   *
+   * Existe para o caso em que o escopo decide a PRESENÇA de um bloco da
+   * resposta, e não o direito de fazer a chamada: o detalhe do contrato
+   * inclui os títulos quando a chave tem `invoices:read` e os omite quando
+   * não tem, em vez de recusar a requisição inteira e negar junto os dados
+   * do contrato, que ela pode ver.
+   */
+  protected function hasScope($scope)
+  {
+    $scopes = json_decode($this->api_key->scopes, TRUE);
+    return is_array($scopes) && in_array($scope, $scopes, TRUE);
   }
 
   protected function requireGet()

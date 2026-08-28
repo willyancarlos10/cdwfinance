@@ -1127,11 +1127,12 @@ class Bomcontrole_model extends CI_Model
      * a vencer em até DIAS_FUTURO dias) e pagas (últimos MESES_PAGAS meses),
      * ordenadas do vencimento mais recente para o mais antigo.
      *
-     * @param  int $idContract
-     * @param  int $idCompany
+     * @param  int      $idContract
+     * @param  int      $idCompany
+     * @param  int|null $timeout segundos por chamada; NULL usa o padrão da library
      * @return array success, message, data
      */
-    public function montarExtratoContrato($idContract, $idCompany)
+    public function montarExtratoContrato($idContract, $idCompany, $timeout = NULL)
     {
         $contrato = $this->global_model->getWhere_off(
             'crm_contracts',
@@ -1144,13 +1145,22 @@ class Bomcontrole_model extends CI_Model
 
         if (empty($contrato->bomcontrole_contract_id)) {
             // Sem vínculo não é erro: é o estado que a aba mostra com o botão
-            // de vincular.
+            // de vincular. E é aqui que a rede é evitada — contrato sem
+            // vínculo NUNCA chega a chamar o ERP.
             return ['success' => TRUE, 'message' => '', 'data' => ['vinculado' => FALSE]];
         }
 
         $config = $this->getConfig($idCompany);
         if (!$config['success']) {
             return ['success' => FALSE, 'message' => $config['message'], 'data' => NULL];
+        }
+
+        // Timeout menor que o padrão (30s por chamada, e são duas) quando quem
+        // chama está preso numa requisição — o mesmo motivo do
+        // TIMEOUT_SINCRONIZACAO em sincronizarCliente(). A tela não passa
+        // nada e continua no padrão da library.
+        if ($timeout !== NULL && (int) $timeout > 0) {
+            $config['config']['timeout'] = (int) $timeout;
         }
 
         $sessao = sessao_suspender();

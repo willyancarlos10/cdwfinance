@@ -3,7 +3,15 @@ defined('BASEPATH') or exit('No direct script access allowed');
 
 class Api_key_model extends CI_Model
 {
-  const PREFIX = 'gcms_live_';
+  /**
+   * Prefixo do token. Mudou de `gcms_live_` (herança do GestorCMS) para
+   * `cdwf_live_` quando a API do financeiro foi publicada — não havia nenhuma
+   * chave emitida, então a troca não quebrou integração alguma.
+   *
+   * Precisa casar com o regex de Api_Controller::authenticateApiKey() e com o
+   * `Mcp::authenticate()`: os três descrevem o mesmo formato de token.
+   */
+  const PREFIX = 'cdwf_live_';
 
   public function getByCompany($idCompany)
   {

@@ -154,13 +154,20 @@
             <div class="dropdown-menu dropdown-menu-start dropdown-mega" aria-labelledby="servicesDropdown">
               <div class="d-md-flex align-items-start justify-content-start">
                 <div class="dropdown-mega-list">
-                  <a class="dropdown-item" href="<?php echo base_url('usuarios'); ?>">Usuários</a>
-                  <a class="dropdown-item" href="<?php echo base_url('empresas'); ?>">Empresas</a>
+                  <a class="dropdown-item" href="#" id="btn_busca_cliente">Buscar cliente</a>
+                  <a class="dropdown-item" href="<?php echo base_url('servidores'); ?>">Servidores</a>
+                  <a class="dropdown-item" href="<?php echo base_url('monitoramento'); ?>">Monitoramento</a>
                 </div>
               </div>
             </div>
           </li>
         </ul>
+        <?php
+        // Modal da busca rápida: fica dentro do mesmo `if` do gatilho. Fora
+        // dele, o HTML seria injetado em toda tela de todos os tenants sem
+        // nunca poder ser aberto.
+        $this->load->view('customers/quick_search_modal');
+        ?>
       <?php } ?>
 
       <div class="navbar-collapse collapse">

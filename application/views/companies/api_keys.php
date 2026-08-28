@@ -34,9 +34,9 @@ $escape = function ($value) {
           <i class="mdi mdi-key-plus"></i> NOVA CHAVE
         </button>
       </div>
-      <div class="card-body">
+      <div class="card-body pt-0">
         <div class="alert alert-info p-3">
-          As chaves não expiram, mas podem ser revogadas a qualquer momento. A chave completa é exibida somente após a criação.</a>.
+          As chaves não expiram, mas podem ser revogadas a qualquer momento, a chave é exibida somente após a criação.
         </div>
 
         <?php if (!empty($api_key_plaintext)) { ?>

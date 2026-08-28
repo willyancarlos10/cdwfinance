@@ -3,6 +3,30 @@ defined('BASEPATH') or exit('No direct script access allowed');
 
 class Empresas extends MY_Controller
 {
+  /**
+   * Catálogo de permissões oferecidas na geração de chave de API.
+   *
+   * É UMA constante, e não duas listas, de propósito: a tela lê os rótulos daqui
+   * e o POST valida contra `array_keys()` desta mesma constante. No projeto de
+   * referência (platagorma-painel-v3) a lista aparece literalmente duas vezes —
+   * no catálogo da tela e na whitelist do POST —, e escopo cadastrado só num
+   * dos lados aparece na tela e é descartado em silêncio ao salvar.
+   *
+   * Os escopos precisam bater com o `requireScope()` de cada endpoint em
+   * Api_v1 e com o mapa de tools do Mcp.
+   */
+  const API_SCOPES = [
+    'companies:read' => 'Consultar dados da empresa',
+    'customers:read' => 'Consultar clientes',
+    'contracts:read' => 'Consultar contratos',
+    'invoices:read' => 'Consultar títulos do contrato (faturas e extrato do Bom Controle)',
+    'contacts:read' => 'Consultar contatos de clientes',
+    'attachments:read' => 'Consultar anexos de clientes',
+    'servers:read' => 'Consultar servidores',
+    'contract-domains:read' => 'Consultar domínios contratados',
+    'server-domains:read' => 'Consultar domínios nos servidores',
+    'service-types:read' => 'Consultar tipos de serviço',
+  ];
 
   public function __construct()
   {
@@ -103,14 +127,7 @@ class Empresas extends MY_Controller
     $this->data['company'] = $company;
     $this->data['api_keys'] = $this->api_key_model->getByCompany($idCompany);
     $this->data['api_key_plaintext'] = $this->session->flashdata('api_key_plaintext');
-    // Catálogo de permissões oferecidas na geração de chave. Está vazio porque
-    // os escopos antigos eram todos do CMS (artigos, vagas, leads, mailboxes) e
-    // saíram junto com os endpoints.
-    //
-    // Ao criar o primeiro endpoint do financeiro, cadastre o escopo aqui E em
-    // normalizeApiKeyScopes() — os dois precisam listar exatamente as mesmas
-    // chaves, senão a permissão aparece na tela mas é descartada ao salvar.
-    $this->data['api_key_scopes'] = [];
+    $this->data['api_key_scopes'] = self::API_SCOPES;
 
     $this->load->view('header', $this->data);
     $this->load->view('companies/api_keys', $this->data);
@@ -128,10 +145,10 @@ class Empresas extends MY_Controller
 
   private function normalizeApiKeyScopes($scopes)
   {
-    // Lista branca de escopos aceitos no POST. Precisa espelhar o catálogo
-    // exibido em renderApiKeys(); enquanto estiver vazia, nenhuma chave nova
-    // pode ser gerada — chave sem escopo não autoriza nada mesmo.
-    $allowedScopes = [];
+    // Lista branca do POST, tirada do MESMO catálogo que a tela exibe — ver o
+    // docblock de API_SCOPES. Chave sem nenhum escopo válido não é criada:
+    // ela não autorizaria nada e só ocuparia espaço na listagem.
+    $allowedScopes = array_keys(self::API_SCOPES);
     if (!is_array($scopes)) {
       return FALSE;
     }

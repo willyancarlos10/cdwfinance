@@ -76,6 +76,31 @@ class Clientes extends MY_Controller
    */
   const LIMITE_EXPORTACAO = 3000;
 
+  /**
+   * Quantos clientes a busca rápida do "Acesso rápido" mostra por vez.
+   *
+   * A consulta pede um a mais (LIMIT + 1) só para saber que havia mais sem
+   * pagar um COUNT à parte — mesmo truque de Painel::json_getdominioscard.
+   */
+  const BUSCA_RAPIDA_LIMITE = 5;
+
+  /**
+   * Quantos domínios aparecem por cliente na busca rápida.
+   *
+   * Existe porque a base tem cliente com 65 domínios: sem o corte, uma linha
+   * do modal viraria uma parede de texto. O que passa disso vira "+N".
+   */
+  const BUSCA_RAPIDA_DOMINIOS = 3;
+
+  /**
+   * Mínimo de caracteres para a busca rápida ir ao banco.
+   *
+   * Com um caractere só, o LIKE casa com quase toda a base e o corte em cinco
+   * seria arbitrário — a tela pediria ao usuário que escolhesse entre cinco
+   * clientes sorteados.
+   */
+  const BUSCA_RAPIDA_MINIMO = 2;
+
   public function __construct()
   {
     parent::__construct();
@@ -114,6 +139,16 @@ class Clientes extends MY_Controller
       '',
       $config['per_page'],
       $this->uri->segment(3)
+    );
+
+    // Situação real dos contratos de cada cliente da página (quantos
+    // vigentes, suspensos, encerrados). Uma query só para a página inteira,
+    // no padrão da contagem de domínios da exportação — a alternativa seria
+    // uma consulta por linha.
+    $this->data['contract_status_counts'] = $this->contagemContratosPorCliente(
+      array_map(function ($cliente) {
+        return (int) $cliente->id;
+      }, (array) $this->data['results'])
     );
 
     $this->data['total_results'] = $config['total_rows'];
@@ -1155,6 +1190,252 @@ class Clientes extends MY_Controller
     ]);
   }
 
+  /**
+   * Busca rápida de clientes do "Acesso rápido" (modal do topo).
+   *
+   * Existe para responder "onde está o cliente X?" sem passar pela listagem:
+   * lá a busca recarrega a tela e GRAVA o termo em `f_customers`, então usá-la
+   * como atalho deixaria um filtro pendurado na sessão que o usuário não
+   * pediu. Por isso aqui o SQL é escrito à mão, e não pelos helpers do
+   * Global_model — `getListW`/`getFilter` leem e escrevem aquela mesma chave.
+   *
+   * Casa por nome, nome fantasia, e-mail, documento e DOMÍNIO de contrato:
+   * quem atende costuma lembrar do site do cliente antes da razão social.
+   *
+   * Autenticação vem do MY_Controller, que intercepta todo AJAX sem sessão e
+   * responde `{redirect:true}` com HTTP 200 antes deste método rodar.
+   */
+  public function json_postbuscarapida()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $idCompany = (int) $this->getCurrentCompanyId();
+    $termo = trim((string) $this->input->post('termo'));
+    // Teto de comprimento: o termo vira cinco LIKEs, e não há busca legítima
+    // com 100+ caracteres — só custo de varredura.
+    $termo = mb_substr($termo, 0, 100, 'UTF-8');
+    $termo = mb_strtolower($termo, 'UTF-8');
+
+    if (mb_strlen($termo, 'UTF-8') < self::BUSCA_RAPIDA_MINIMO) {
+      echo json_encode([
+        'success' => TRUE,
+        'return' => TRUE,
+        'message' => '',
+        'data' => [
+          'termo' => $termo,
+          'curto' => TRUE,
+          'tem_mais' => FALSE,
+          'total_exibido' => 0,
+          'clientes' => [],
+        ],
+        'errors' => [],
+      ]);
+      return;
+    }
+
+    // A coluna `document` guarda SÓ DÍGITOS, então o CNPJ digitado com máscara
+    // nunca casaria. Mesma normalização de post_filtrar(). É uma SEGUNDA forma
+    // do termo, não uma substituição: quem digita "294" continua achando pelo
+    // nome, e não só pelo documento.
+    $termoDoc = $termo;
+    if (preg_match('/^[0-9.\/\- ]+$/', $termo)) {
+      $digitos = sonumero($termo);
+      if (strlen($digitos) >= 4) $termoDoc = $digitos;
+    }
+
+    // O bind protege aspas, mas NÃO protege os curingas do LIKE: sem
+    // escape_like_str, um "%" digitado casaria com a base inteira. O ESCAPE '!'
+    // acompanha o escape porque é o caractere que o CI3 usa (_like_escape_chr).
+    $contem = '%' . $this->db->escape_like_str($termo) . '%';
+    $comeca = $this->db->escape_like_str($termo) . '%';
+    $doc = '%' . $this->db->escape_like_str($termoDoc) . '%';
+
+    // Os ORs ficam num ÚNICO parêntese ao lado do id_company. Sem ele, a
+    // precedência do SQL lê "id_company = N AND name LIKE x OR byname LIKE x"
+    // e a busca devolve clientes de OUTROS tenants.
+    //
+    // O ORDER BY põe na frente quem COMEÇA com o termo: com LIMIT 5 e corte
+    // alfabético, um cliente cujo nome casa exatamente pode ficar de fora.
+    $sql = "SELECT c.id, c.type, c.document, c.name, c.byname,
+                   c.contracts_count, c.active_contracts_count
+              FROM crm_customers_v c
+             WHERE c.id_company = ?
+               AND (    LOWER(c.name)   LIKE ? ESCAPE '!'
+                     OR LOWER(c.byname) LIKE ? ESCAPE '!'
+                     OR LOWER(c.email)  LIKE ? ESCAPE '!'
+                     OR c.document      LIKE ?
+                     OR EXISTS (SELECT 1
+                                  FROM crm_contracts_domains_v dx
+                                 WHERE dx.id_customer = c.id
+                                   AND LOWER(dx.domain) LIKE ? ESCAPE '!')
+                   )
+             ORDER BY (LOWER(c.byname) LIKE ? ESCAPE '!'
+                    OR LOWER(c.name)   LIKE ? ESCAPE '!') DESC,
+                      c.name ASC
+             LIMIT " . ((int) self::BUSCA_RAPIDA_LIMITE + 1);
+
+    $linhas = $this->db->query($sql, [
+      $idCompany,
+      $contem,
+      $contem,
+      $contem,
+      $doc,
+      $contem,
+      $comeca,
+      $comeca,
+    ])->result();
+
+    // Pediu um a mais só para saber que havia mais — o excedente não é exibido.
+    $temMais = count($linhas) > self::BUSCA_RAPIDA_LIMITE;
+    $linhas = array_slice($linhas, 0, self::BUSCA_RAPIDA_LIMITE);
+
+    $dominios = $this->dominiosDaBuscaRapida($linhas, $idCompany, $termo);
+
+    // Contagem por SITUAÇÃO, reusando o mesmo método da listagem: cliente com
+    // um contrato vigente e outro suspenso não pode aparecer aqui só como "1
+    // vigente", e quem só tem contrato encerrado tem de ficar distinguível de
+    // quem nunca teve contrato. Por isso os selos, e não contracts_count.
+    $ids = [];
+    foreach ($linhas as $linha) {
+      $ids[] = (int) $linha->id;
+    }
+    $situacoesPorCliente = $this->contagemContratosPorCliente($ids);
+
+    $clientes = [];
+    foreach ($linhas as $linha) {
+      $lista = isset($dominios[(int) $linha->id]) ? $dominios[(int) $linha->id] : [];
+      $situacoes = isset($situacoesPorCliente[(int) $linha->id]) ? $situacoesPorCliente[(int) $linha->id] : [];
+
+      $clientes[] = [
+        'id' => (int) $linha->id,
+        'nome' => (string) $linha->name,
+        'fantasia' => (string) $linha->byname,
+        'tipo' => (string) $linha->type,
+        'documento' => cnpj($linha->document),
+        'contratos' => $this->selosContratoBuscaRapida($situacoes),
+        'contratos_total' => array_sum($situacoes),
+        'dominios_total' => count($lista),
+        'dominios' => array_slice($lista, 0, self::BUSCA_RAPIDA_DOMINIOS),
+        'url' => base_url('clientes/info?id=' . (int) $linha->id),
+      ];
+    }
+
+    echo json_encode([
+      'success' => TRUE,
+      'return' => TRUE,
+      'message' => '',
+      'data' => [
+        'termo' => $termo,
+        'curto' => FALSE,
+        'tem_mais' => $temMais,
+        'total_exibido' => count($clientes),
+        'clientes' => $clientes,
+      ],
+      'errors' => [],
+    ]);
+  }
+
+  /**
+   * Selos de situação dos contratos de um cliente, para a busca rápida.
+   *
+   * Mesmas cores e mesmos rótulos da coluna "Contratos" da listagem — três
+   * vocabulários para o mesmo estado fariam a mesma linha parecer coisas
+   * diferentes conforme a tela. Resolvidos aqui, e não no JS, para o catálogo
+   * ficar do lado do PHP como nas demais telas.
+   *
+   * A ordem é a do catálogo; um status fora dele ainda assim é desenhado, no
+   * fim e em cinza-escuro, porque `status` é varchar e sumir da tela seria
+   * pior que aparecer sem cor própria.
+   *
+   * @param  array $situacoes status => quantidade
+   * @return array lista de ['texto' => ..., 'classe' => ...]
+   */
+  private function selosContratoBuscaRapida(array $situacoes)
+  {
+    $cores = ['vigente' => 'bg-success', 'suspenso' => 'bg-warning', 'encerrado' => 'bg-secondary'];
+    $rotulos = [
+      'vigente' => ['vigente', 'vigentes'],
+      'suspenso' => ['suspenso', 'suspensos'],
+      'encerrado' => ['encerrado', 'encerrados'],
+    ];
+
+    $ordenadas = [];
+    foreach (array_keys($cores) as $slug) {
+      if (!empty($situacoes[$slug])) $ordenadas[$slug] = (int) $situacoes[$slug];
+    }
+    foreach ($situacoes as $slug => $quantidade) {
+      if (!isset($ordenadas[$slug]) && (int) $quantidade > 0) $ordenadas[$slug] = (int) $quantidade;
+    }
+
+    $selos = [];
+    foreach ($ordenadas as $slug => $quantidade) {
+      $rotulo = isset($rotulos[$slug]) ? $rotulos[$slug][$quantidade > 1 ? 1 : 0] : $slug;
+      $selos[] = [
+        'texto' => numero($quantidade) . ' ' . $rotulo,
+        'classe' => isset($cores[$slug]) ? $cores[$slug] : 'bg-dark',
+      ];
+    }
+
+    return $selos;
+  }
+
+  /**
+   * Domínios dos clientes que a busca rápida encontrou, agrupados por cliente.
+   *
+   * Uma query só para todos eles (a crm_contracts_domains_v carrega
+   * id_customer desde a migration 011 justamente para isto), no mesmo padrão
+   * de info(). Não filtra por contrato vigente de propósito: quem procura o
+   * cliente pelo domínio precisa achá-lo mesmo com o contrato suspenso — é
+   * justamente aí que alguém vai investigar.
+   *
+   * A ordem NÃO é alfabética: os domínios que casam com o termo vêm primeiro.
+   * Sem isso, buscar "cdwtech" num cliente com 56 domínios mostrava os três
+   * primeiros do alfabeto e escondia justamente o que foi digitado.
+   *
+   * @param  array  $linhas    Clientes da primeira consulta
+   * @param  int    $idCompany Tenant
+   * @param  string $termo     Termo já normalizado (minúsculo)
+   * @return array  id_customer => lista de domínios, relevantes primeiro
+   */
+  private function dominiosDaBuscaRapida($linhas, $idCompany, $termo)
+  {
+    if (empty($linhas)) return [];
+
+    $ids = [];
+    foreach ($linhas as $linha) {
+      $ids[] = (int) $linha->id;
+    }
+
+    // Ids convertidos para inteiro antes de entrar na cláusula: o IN não é
+    // parametrizável de uma vez e nada vindo do POST pode chegar cru ao SQL.
+    $sql = "SELECT id_customer, domain
+              FROM crm_contracts_domains_v
+             WHERE id_company = ? AND id_customer IN (" . implode(',', $ids) . ")
+             ORDER BY domain";
+
+    $agrupado = [];
+    foreach ($this->db->query($sql, [$idCompany])->result() as $linha) {
+      $agrupado[(int) $linha->id_customer][] = (string) $linha->domain;
+    }
+
+    foreach ($agrupado as $idCustomer => $lista) {
+      // O mesmo domínio entra mais de uma vez no contrato quando está em
+      // servidores diferentes (site num painel, e-mail em outro): aqui a
+      // pergunta é "quais nomes", então o nome repetido é um só.
+      $lista = array_values(array_unique($lista));
+
+      usort($lista, function ($a, $b) use ($termo) {
+        $relA = mb_stripos($a, $termo, 0, 'UTF-8') !== FALSE ? 0 : 1;
+        $relB = mb_stripos($b, $termo, 0, 'UTF-8') !== FALSE ? 0 : 1;
+        return $relA === $relB ? strcmp($a, $b) : $relA - $relB;
+      });
+
+      $agrupado[$idCustomer] = $lista;
+    }
+
+    return $agrupado;
+  }
+
   // ------------------------------------------------------------------
   // Apoio
   // ------------------------------------------------------------------
@@ -1173,6 +1454,18 @@ class Clientes extends MY_Controller
     unset($filtros['id_status']);
     $filtros['keyword_search'] = ['name', 'byname', 'document', 'email'];
 
+    // Domínio não é campo do cliente — mora em `crm_contracts_domains`, duas
+    // tabelas adiante —, então não cabe em `keyword_search`, que só compara
+    // colunas da própria `crm_customers_v`. Quem faz a ponte é uma consulta à
+    // parte, cujo resultado o Global_model acrescenta como mais um OR dentro
+    // do grupo da palavra-chave.
+    //
+    // Resolvido A CADA requisição da listagem, e não gravado de uma vez: o
+    // que vale é a keyword corrente, e ids deixados na sessão fariam a busca
+    // seguinte responder com o resultado da anterior. Mesma razão de
+    // `keyword_search` ser reescrito aqui em vez de vir do POST.
+    $filtros['keyword_ids'] = $this->clientesPorDominio($filtros['keyword']);
+
     $this->session->set_userdata('f_customers', $filtros);
 
     $avancado = $this->session->userdata(self::FILTRO_AVANCADO);
@@ -1182,6 +1475,100 @@ class Clientes extends MY_Controller
     if (!array_key_exists('bomcontrole_unlinked', $avancado)) $avancado['bomcontrole_unlinked'] = 0;
 
     $this->session->set_userdata(self::FILTRO_AVANCADO, $avancado);
+  }
+
+  /**
+   * Ids dos clientes do tenant que têm a palavra-chave em algum domínio de
+   * contrato — a ponte que faz a busca da listagem encontrar o cliente pelo
+   * domínio, que não está em nenhum campo do cadastro dele.
+   *
+   * Consulta à parte, e não coluna derivada na `crm_customers_v`, pelo mesmo
+   * motivo de `contagemDominiosPorCliente()`: um subselect na view seria pago
+   * por toda listagem, toda contagem de paginação e todas as telas que leem a
+   * view, enquanto esta pergunta só existe quando há busca. E a única coluna
+   * que serviria a um LIKE seria um `GROUP_CONCAT` dos domínios, que o MySQL
+   * corta em `group_concat_max_len` — 1 KB no padrão do servidor, menos que os
+   * 1,3 KB de domínios que os dois maiores clientes desta base já têm. O corte
+   * é silencioso: a busca simplesmente não acharia o domínio truncado.
+   *
+   * Vale para contrato de QUALQUER situação: quem procura um domínio quer
+   * chegar ao cliente, mesmo que o contrato esteja suspenso ou encerrado —
+   * recortar por vigente é papel do filtro de situação contratual, que é eixo
+   * independente.
+   *
+   * @param  string $keyword
+   * @return array  ids de cliente (vazio quando não há busca)
+   */
+  private function clientesPorDominio($keyword)
+  {
+    $keyword = trim((string) $keyword);
+    if ($keyword === '') return [];
+
+    // Mesma regra de busca insensível que o `keyword_search` aplica nas
+    // colunas do cliente, com o valor já escapado pelo Global_model.
+    $condicao = $this->global_model->getInsensitiveLikeCondition('crm_contracts_domains.domain', $keyword);
+
+    // Sem binds de propósito: a condição acima já traz o texto buscado
+    // escapado, e uma interrogação digitada na busca seria contada pelo CI3
+    // como marcador posicional, deslocando os valores. O único parâmetro é o
+    // id do tenant, inteiro forçado — o mesmo que montarWhereListagem() faz.
+    $sql = "SELECT DISTINCT crm_contracts.id_customer AS id_customer
+              FROM crm_contracts_domains
+              JOIN crm_contracts ON(crm_contracts.id = crm_contracts_domains.id_contract)
+             WHERE crm_contracts_domains.id_company = " . (int) $this->getCurrentCompanyId() . "
+               AND " . $condicao;
+
+    $ids = [];
+    foreach ($this->db->query($sql)->result() as $linha) {
+      $ids[] = (int) $linha->id_customer;
+    }
+
+    return $ids;
+  }
+
+  /**
+   * Contratos de cada cliente POR SITUAÇÃO, para a coluna "Contratos" da
+   * listagem.
+   *
+   * Query agregada em vez de colunas derivadas na `crm_customers_v`: a
+   * pergunta é de exibição, não de filtro — `active_contracts_count` e
+   * `bomcontrole_unlinked_contracts_count` estão na view porque o WHERE
+   * precisava delas (migrations 018 e 026), o que não é o caso aqui. Assim o
+   * custo fica só na listagem, e não em toda contagem de paginação nem nas
+   * outras telas que leem a view.
+   *
+   * O recorte é a PÁGINA: a coluna só desenha os clientes visíveis.
+   *
+   * `GROUP BY status`, e não um contador por situação conhecida: `status` é
+   * varchar, e um valor novo aparece na tela sozinho em vez de sumir da soma.
+   * É a mesma razão pela qual os contadores do Dashboard são afirmativos e
+   * nunca uma subtração do total.
+   *
+   * @param  array $idsClientes ids da página
+   * @return array id_customer => [status => quantidade]
+   */
+  private function contagemContratosPorCliente(array $idsClientes)
+  {
+    $ids = [];
+    foreach ($idsClientes as $id) {
+      $id = (int) $id;
+      if ($id > 0) $ids[$id] = $id;
+    }
+
+    if (empty($ids)) return [];
+
+    $sql = "SELECT id_customer, status, COUNT(*) AS total
+              FROM crm_contracts
+             WHERE id_company = " . (int) $this->getCurrentCompanyId() . "
+               AND id_customer IN (" . implode(',', $ids) . ")
+             GROUP BY id_customer, status";
+
+    $porCliente = [];
+    foreach ($this->db->query($sql)->result() as $linha) {
+      $porCliente[(int) $linha->id_customer][(string) $linha->status] = (int) $linha->total;
+    }
+
+    return $porCliente;
   }
 
   /**

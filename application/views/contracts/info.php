@@ -57,12 +57,12 @@ $temEspaco = ((float) $result->space_gb) > 0;
         <input type="hidden" name="id" value="<?php echo (int) $result->id; ?>">
         <input type="hidden" name="acao" id="campo_acao_status" value="<?php echo $vigente ? 'suspender' : 'reativar'; ?>">
         <?php if ($vigente) { ?>
-          <button type="button" class="btn btn-outline-warning" id="btn_status" data-acao="suspender"><i class="mdi mdi-pause-circle-outline"></i> SUSPENDER</button>
+          <button type="button" class="btn btn-warning" id="btn_status" data-acao="suspender"><i class="mdi mdi-pause-circle-outline"></i> SUSPENDER</button>
         <?php } else { ?>
           <button type="button" class="btn btn-success" id="btn_status" data-acao="reativar"><i class="fa fa-check"></i> REATIVAR</button>
         <?php } ?>
       </form>
-      <button type="button" class="btn btn-warning" data-bs-toggle="modal" data-bs-target="#modal_encerrar"><i class="mdi mdi-close-circle-outline"></i> ENCERRAR</button>
+      <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#modal_encerrar"><i class="mdi mdi-close-circle-outline"></i> ENCERRAR CONTRATO</button>
       <form method="POST" id="form_excluir_contrato" action="<?php echo base_url('contratos/post_excluir'); ?>" class="d-inline">
         <input type="hidden" name="id" value="<?php echo (int) $result->id; ?>">
         <button type="button" class="btn btn-outline-danger" id="btn_excluir_contrato"><i class="fa fa-trash"></i> EXCLUIR CONTRATO</button>
@@ -319,8 +319,14 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
               </div>
 
 
-              <hr>
-              <h6 class="mb-1">Reajuses</h6>
+              <?php // O separador e o título também são `bloco-cdw`: sem isso, com o
+                    // faturamento no Bom Controle a tela mostrava o cabeçalho
+                    // "Reajustes" seguido de espaço vazio, sugerindo campo que sumiu
+                    // por bug. Reajuste é do motor daqui — no ERP quem reajusta é ele. ?>
+              <div class="col-12 bloco-cdw">
+                <hr>
+                <h6 class="mb-1">Reajustes</h6>
+              </div>
               <div class="col-12 col-md-3 bloco-cdw">
                 <div class="form-group mb-3">
                   <label class="form-label">Reajuste anual</label>
@@ -349,6 +355,20 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
               </div>
             <?php } ?>
 
+            <?php // Também `bloco-cdw`: os avisos de boleto, nota e reajuste saem das
+                  // rotinas DAQUI (cron_enviar_faturas, cron_enviar_notas,
+                  // cron_reajustar_contratos), e nenhuma delas olha contrato do Bom
+                  // Controle. Deixar os campos à mostra prometia um aviso que não
+                  // aconteceria.
+                  //
+                  // ESCONDER NÃO APAGA: os inputs continuam no formulário e são
+                  // enviados normalmente, então o `post_faturamento` segue gravando o
+                  // `notification_config` — que é o comportamento desejado desde a
+                  // migration 033 ("quem avisa o cliente é pergunta independente de
+                  // quem emite a cobrança, e apagar a lista ao virar a chave perderia
+                  // cadastro sem avisar"). Ao voltar para o CDW Finance, a lista
+                  // reaparece intacta. ?>
+            <div class="bloco-cdw">
             <hr>
             <h6 class="mb-1">Notificações ao cliente</h6>
             <p class="text-muted mb-3">
@@ -418,6 +438,7 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
                 <p class="text-muted mt-1 mb-3"><small>Sem tipo: no WhatsApp cada número recebe a sua própria mensagem.</small></p>
               </div>
             </div>
+            </div><?php // fim do bloco-cdw das Notificações ?>
             <button type="submit" class="btn btn-primary"><i class="mdi mdi-content-save"></i> SALVAR FATURAMENTO</button>
           </form>
 
@@ -984,7 +1005,7 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
           </div>
           <div class="modal-footer">
             <div class="col">
-              <button type="submit" class="btn w-100 btn-warning"><i class="mdi mdi-close-circle-outline"></i> ENCERRAR CONTRATO</button>
+              <button type="submit" class="btn w-100 btn-danger"><i class="mdi mdi-close-circle-outline"></i> ENCERRAR CONTRATO</button>
             </div>
             <div class="col"></div>
             <div class="col">

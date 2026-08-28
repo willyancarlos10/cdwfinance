@@ -3,6 +3,18 @@ $filtro = (array) $this->session->userdata('f_customers');
 $tipos = ['J' => 'Pessoa jurídica', 'F' => 'Pessoa física'];
 $badgeTipo = ['J' => 'bg-primary', 'F' => 'bg-info'];
 
+// Situação do contrato: as mesmas cores e os mesmos rótulos da tela do
+// contrato e da visão geral do cliente — a coluna "Contratos" desta
+// listagem passou a mostrar a contagem por situação, e três vocabulários
+// para o mesmo estado fariam a mesma linha parecer coisas diferentes
+// conforme a tela. A ORDEM deste array é a ordem dos selos.
+$badgeContratoStatus = ['vigente' => 'bg-success', 'suspenso' => 'bg-warning', 'encerrado' => 'bg-secondary'];
+$rotuloContratoStatus = [
+  'vigente' => ['vigente', 'vigentes'],
+  'suspenso' => ['suspenso', 'suspensos'],
+  'encerrado' => ['encerrado', 'encerrados'],
+];
+
 $fKeyword = isset($filtro['keyword']) ? trim((string) $filtro['keyword']) : '';
 $fTipo = isset($filtro['type']) ? (string) $filtro['type'] : '';
 $fServico = isset($filtro_avancado['id_service_type']) ? (int) $filtro_avancado['id_service_type'] : 0;
@@ -81,7 +93,7 @@ $temFiltro = ($fKeyword !== '' || !empty($chips));
       <div class="col-12 col-md-10">
         <form method="POST" action="<?php echo base_url('clientes/post_filtrar'); ?>" role="search">
           <div class="input-group">
-            <input type="text" class="form-control" name="f_customers[keyword]" value="<?php echo htmlspecialchars($fKeyword, ENT_QUOTES, 'UTF-8'); ?>" placeholder="Nome, nome fantasia, documento ou e-mail..." autocomplete="off" aria-label="Buscar clientes">
+            <input type="text" class="form-control" name="f_customers[keyword]" value="<?php echo htmlspecialchars($fKeyword, ENT_QUOTES, 'UTF-8'); ?>" placeholder="Nome, nome fantasia, documento, e-mail ou domínio..." autocomplete="off" aria-label="Buscar clientes">
             <button class="btn btn-primary" type="submit" title="Esvazie o campo e busque de novo para ver a base inteira"><i class="fa fa-search"></i> BUSCAR</button>
           </div>
         </form>
@@ -211,10 +223,41 @@ $temFiltro = ($fKeyword !== '' || !empty($chips));
                 </td>
                 <td align="center"><small><?php echo cnpj($row->document); ?></small></td>
                 <td align="center">
-                  <?php if ((int) $row->active_contracts_count > 0) { ?>
-                    <span class="badge bg-success"><?php echo numero((int) $row->active_contracts_count); ?> vigente(s)</span>
+                  <?php
+                  // Contagem por situação, e não só a de vigentes: cliente com um
+                  // contrato vigente e outro suspenso aparecia aqui como "1
+                  // vigente(s)", sem nenhuma pista do segundo — e quem só tinha
+                  // contrato encerrado ficava indistinguível de quem nunca teve
+                  // contrato nenhum.
+                  //
+                  // Os catálogos vêm primeiro para fixar a ordem (vigente,
+                  // suspenso, encerrado); um status fora deles ainda assim é
+                  // desenhado, no fim e em cinza-escuro, porque `status` é varchar
+                  // e sumir da tela seria pior que aparecer sem cor própria.
+                  $situacoes = isset($contract_status_counts[(int) $row->id]) ? $contract_status_counts[(int) $row->id] : [];
+                  $ordenadas = [];
+                  foreach (array_keys($badgeContratoStatus) as $slug) {
+                    if (!empty($situacoes[$slug])) $ordenadas[$slug] = (int) $situacoes[$slug];
+                  }
+                  foreach ($situacoes as $slug => $quantidade) {
+                    if (!isset($ordenadas[$slug]) && (int) $quantidade > 0) $ordenadas[$slug] = (int) $quantidade;
+                  }
+                  $totalContratos = array_sum($ordenadas);
+                  ?>
+                  <?php if ($totalContratos > 0) { ?>
+                    <div class="d-flex flex-wrap gap-1 justify-content-center" title="<?php echo numero($totalContratos); ?> contrato(s) no total">
+                      <?php foreach ($ordenadas as $slug => $quantidade) { ?>
+                        <?php
+                        $badge = isset($badgeContratoStatus[$slug]) ? $badgeContratoStatus[$slug] : 'bg-dark';
+                        $rotulo = isset($rotuloContratoStatus[$slug])
+                          ? $rotuloContratoStatus[$slug][$quantidade > 1 ? 1 : 0]
+                          : $slug;
+                        ?>
+                        <span class="badge <?php echo $badge; ?>"><?php echo numero($quantidade); ?> <?php echo htmlspecialchars($rotulo, ENT_QUOTES, 'UTF-8'); ?></span>
+                      <?php } ?>
+                    </div>
                   <?php } else { ?>
-                    <span class="badge bg-secondary">Sem contrato vigente</span>
+                    <span class="badge bg-light text-dark border">Sem contrato</span>
                   <?php } ?>
                 </td>
                 <td align="center"><small><?php echo data($row->created); ?></small></td>
