@@ -68,6 +68,12 @@
             <?php } ?>
           </a>
         </li>
+        <?php $menu_reference = array('ips-contratados'); ?>
+        <li class="sidebar-item <?php if (in_array($menu, $menu_reference)) echo 'active'; ?>">
+          <a class="sidebar-link" href="<?php echo base_url('ips-contratados'); ?>">
+            <i class="mdi mdi-ip-network-outline"></i> <span class="align-middle">IPs contratados</span>
+          </a>
+        </li>
         <li class="sidebar-header pt-1 pb-1">CONFIGURAÇÕES</li>
         <?php $menu_reference = array('usuarios'); ?>
         <li class="sidebar-item <?php if (in_array($menu, $menu_reference)) echo 'active'; ?>">

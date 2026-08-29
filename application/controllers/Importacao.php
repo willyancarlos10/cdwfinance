@@ -245,6 +245,17 @@ class Importacao extends CI_Controller
       ));
     }
 
+    // Mudança de estado de contrato ganha linha própria, e não some no meio de
+    // "atualizados": é o efeito da importação que a operação de fato precisa
+    // ver — o serviço nos painéis NÃO acompanha esta reescrita.
+    $alterados = isset($dados['contratos_com_status_alterado']) ? (int) $dados['contratos_com_status_alterado'] : 0;
+
+    if ($alterados > 0) {
+      $this->linha('');
+      $this->linha('  ATENÇÃO: ' . $alterados . ' contrato(s) tiveram o STATUS reescrito pelo dump.');
+      $this->linha('  As contas dos painéis não foram alteradas. Detalhe na aba Históricos de cada contrato.');
+    }
+
     $avisos = isset($dados['avisos']) ? $dados['avisos'] : [];
 
     if (!empty($avisos)) {

@@ -123,6 +123,17 @@ class Import_gestor_model extends CI_Model
   private $idCompany;
   private $idUser;
   private $simulacao = FALSE;
+
+  /**
+   * Ids gravados em `crm_contracts_history` nesta rodada, para o resumo do fim.
+   *
+   * A importação NÃO manda um e-mail por contrato: uma execução reescreve
+   * centenas de linhas, e uma caixa de entrada com 400 avisos vira filtro de
+   * lixeira — o alerta morreria junto com o caso que ele existe para pegar.
+   *
+   * @var array
+   */
+  private $eventosDaRodada = [];
   private $pastaArquivos;
   private $agora;
 
@@ -304,6 +315,15 @@ class Import_gestor_model extends CI_Model
       $erros += $etapa['erros'];
     }
 
+    // UM resumo no fim, com todas as mudanças de estado da rodada. Fica fora do
+    // try/finally acima de propósito: com o `db_debug` já restaurado, uma falha
+    // ao enfileirar o e-mail aparece em vez de sumir — e a essa altura tudo o
+    // que importava já está gravado, então não há mais nada para proteger.
+    if (!empty($this->eventosDaRodada)) {
+      $this->load->model('contract_history_model');
+      $this->contract_history_model->notificarLote($this->eventosDaRodada, $this->idCompany);
+    }
+
     return [
       'success' => ($erros === 0),
       'message' => $erros === 0
@@ -315,6 +335,10 @@ class Import_gestor_model extends CI_Model
         'id_user' => $this->idUser,
         'contagens_origem' => $contagens,
         'etapas' => $etapas,
+        // Reportado no stdout como as demais contagens: mudança de estado
+        // aplicada em silêncio é indistinguível de "nada aconteceu", que é o
+        // problema que este número existe para acabar.
+        'contratos_com_status_alterado' => count($this->eventosDaRodada),
         'avisos' => $this->avisos,
       ],
     ];
@@ -691,6 +715,23 @@ class Import_gestor_model extends CI_Model
   {
     $contadores = $this->novosContadores(count($linhas));
 
+    // Retrato do estado ANTES da rodada, numa query só.
+    //
+    // Esta etapa é a razão de o histórico existir. O `upsert()` grava `status`
+    // junto dos demais campos, então toda execução devolve o contrato ao estado
+    // do dump — um contrato suspenso à mão aqui volta a 'vigente' se na origem
+    // estiver ativo, e o inverso também. Foi isso que a equipe leu como
+    // "o sistema está suspendendo e reativando contratos sozinho".
+    //
+    // Pior: o upsert também reescreve `modified` com o `updatedAt` da ORIGEM,
+    // uma data no passado — a única trilha existente apontava para semanas
+    // atrás justamente quando alguém ia investigar o que tinha acabado de
+    // acontecer.
+    //
+    // O comportamento NÃO muda (a origem continua sendo a fonte de verdade
+    // durante a migração); o que muda é ele deixar de ser invisível.
+    $statusAntes = $this->statusAtuaisPorLegacy();
+
     foreach ($linhas as $origem) {
       $legacyId = (int) $origem['id'];
       $idCliente = $this->resolverCliente((int) $origem['clienteId'], 'contratos', $legacyId, $contadores);
@@ -739,15 +780,103 @@ class Import_gestor_model extends CI_Model
         $this->avisar('contratos', $legacyId, 'encerrado sem data na origem — usada a data da última alteração');
       }
 
+      $anterior = isset($statusAntes[$legacyId]) ? $statusAntes[$legacyId] : NULL;
+
       $id = $this->upsert('crm_contracts', $legacyId, $dados, $origem, $contadores, TRUE);
 
       if ($id !== FALSE) {
         $this->mapaContratos[$legacyId] = $id;
         $this->contratosDoCliente[$idCliente][] = $id;
+
+        // Só a MUDANÇA vira evento. O caso comum é o dump repetir o estado que
+        // já está aqui, e registrar isso encheria o histórico de linhas que não
+        // dizem nada — a aba do contrato viraria um log de execução da
+        // importação em vez da trilha do que aconteceu com o contrato.
+        //
+        // Contrato NOVO também não entra: ele não mudou de estado, nasceu. A
+        // carga inicial produziria 400 eventos de uma vez, e o primeiro uso do
+        // recurso seria um e-mail que ninguém lê.
+        if ($anterior !== NULL && $anterior !== $status) {
+          $this->registrarEventoImportacao((int) $id, $anterior, $status, (int) $origem['id']);
+        }
       }
     }
 
     return $contadores;
+  }
+
+  /**
+   * Status atual de cada contrato já importado, indexado por `legacy_id`.
+   *
+   * Uma query, e não um SELECT por linha dentro do laço: são 400 contratos e a
+   * pergunta é a mesma para todos. É o mesmo critério dos índices semeados do
+   * banco antes da etapa de contas de servidor.
+   *
+   * @return array legacy_id => status
+   */
+  private function statusAtuaisPorLegacy()
+  {
+    $linhas = $this->db->query(
+      'SELECT `legacy_id`, `status` FROM `crm_contracts`
+        WHERE `id_company` = ? AND `legacy_id` IS NOT NULL',
+      [(int) $this->idCompany]
+    )->result();
+
+    $mapa = [];
+    foreach ($linhas as $linha) {
+      $mapa[(int) $linha->legacy_id] = (string) $linha->status;
+    }
+
+    return $mapa;
+  }
+
+  /**
+   * Grava no histórico a transição que a importação acabou de aplicar.
+   *
+   * O evento é derivado do par de status, e não de uma ação: a importação não
+   * "suspende", ela reescreve — e o resultado observado é o que se registra.
+   * Transição para um status desconhecido cai em 'suspenso'/'reativado' pelo
+   * destino, e nunca é descartada: uma mudança que não coube no vocabulário é
+   * exatamente a que precisa aparecer.
+   *
+   * @param  int    $idContract
+   * @param  string $de
+   * @param  string $para
+   * @param  int    $legacyId
+   * @return void
+   */
+  private function registrarEventoImportacao($idContract, $de, $para, $legacyId)
+  {
+    $this->avisar('contratos', $legacyId, "status alterado pela importação ({$de} -> {$para})");
+
+    // Na simulação o id pode ser um placeholder negativo e nada foi gravado.
+    if ($this->simulacao || $idContract <= 0) {
+      return;
+    }
+
+    if ($para === 'encerrado') {
+      $evento = 'encerrado';
+    } elseif ($de === 'encerrado') {
+      $evento = 'reaberto';
+    } elseif ($para === 'suspenso') {
+      $evento = 'suspenso';
+    } else {
+      $evento = 'reativado';
+    }
+
+    $this->load->model('contract_history_model');
+
+    $id = $this->contract_history_model->registrar($idContract, $evento, $this->idUser, [
+      'status_from' => $de,
+      'status_to' => $para,
+      'origin' => 'importacao',
+      'detail' => 'Estado reescrito pelo dump do gestor-interno (registro de origem ' . (int) $legacyId
+        . '). As contas dos painéis NÃO foram alteradas — o serviço do cliente não acompanha esta mudança.',
+    ]);
+
+    if ($id !== FALSE) {
+      $this->eventosDaRodada[] = (int) $id;
+    }
   }
 
   /**

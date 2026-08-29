@@ -58,7 +58,14 @@ $mov_altura = function ($valor) use ($mov_maior) {
 // diferentes ("set 2025" contra "out", "12.000" contra "700"), as colunas saem
 // desiguais e as duas linhas desalinham progressivamente. O efeito é a barra de
 // um mês aparecer sob o rótulo do mês anterior.
-$mov_col = 100 / max(1, count($ind_movimento_meses));
+// Formatada AQUI, uma vez, e como string: 100/12 é 8.333…, e sob o locale pt_BR
+// (instalado por Login.php e por MY_Controller::renovar_sessao, e process-wide) o
+// `echo` desse float imprime "8,3333333333333". O `flex-basis` vira inválido e cai
+// em `auto` — que é EXATAMENTE o defeito que o parágrafo acima manda evitar, com o
+// agravante de aparecer só nos workers que já atenderam um login. O separador
+// explícito do number_format é o que torna a saída independente de locale, e
+// formatar uma vez só mantém as duas linhas idênticas, como a nota acima exige.
+$mov_col = number_format(100 / max(1, count($ind_movimento_meses)), 4, '.', '');
 
 // Rótulo curto do mês, derivado da tabela PT-BR que já existe acima.
 $mov_abrev = function ($n) use ($meses_ptbr) {
@@ -144,7 +151,13 @@ foreach (['todos', 'cdw'] as $escopo) {
             // Piso de 2% com valor diferente de zero, mesma razão do gráfico de
             // serviços: uma faixa de 0,4% arredondaria para uma barra invisível
             // e o card diria "não há nada aqui" justamente onde há.
-            'largura' => ($conjunto[$chave] > 0) ? max(2, $pct) : 0,
+            // A largura é INTEIRA de propósito: o projeto instala o locale pt_BR
+            // (Login.php e MY_Controller::renovar_sessao) e setlocale é process-wide,
+            // então num worker que já atendeu um login `echo 62.5` imprime "62,5" e o
+            // CSS vira `width: 62,5%`, que é inválido — a barra zera, de forma
+            // intermitente conforme o worker. O float só pode sair por number_format,
+            // que leva os separadores explícitos (é o que a chave `pct` acima faz).
+            'largura' => ($conjunto[$chave] > 0) ? (int) max(2, round($pct)) : 0,
             'quantidade' => (int) $conjunto[$chave],
         ];
     }
@@ -200,8 +213,10 @@ foreach ($blocos_espaco as $chave => $bloco) {
         'valor' => numero($ind_espaco[$chave]),
         'pct' => number_format($pct, 1, ',', '.') . '%',
         // Mesmo piso de 2% do card de domínios: uma faixa de 0,4% viraria uma
-        // barra invisível bem onde há algo para ver.
-        'largura' => ($ind_espaco[$chave] > 0) ? max(2, $pct) : 0,
+        // barra invisível bem onde há algo para ver. E inteira pelo mesmo motivo
+        // do card de domínios: sob o locale pt_BR o float sai com vírgula e
+        // invalida o `width` do CSS.
+        'largura' => ($ind_espaco[$chave] > 0) ? (int) max(2, round($pct)) : 0,
         'quantidade' => (int) $ind_espaco[$chave],
     ];
 }

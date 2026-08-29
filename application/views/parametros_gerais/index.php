@@ -64,6 +64,11 @@ if ($this->input->post('rdap') !== null) {
               Monitoramento
             </a>
           </li>
+          <li class="nav-item">
+            <a class="nav-link <?php if ($tabsDefault === 'tab_contratos') echo 'active'; ?>" href="#tab_contratos" data-bs-toggle="tab" role="tab" aria-selected="<?php echo $tabsDefault === 'tab_contratos' ? 'true' : 'false'; ?>">
+              Contratos
+            </a>
+          </li>
         </ul>
 
         <?php // Alertas fora do tab-content: dentro de uma aba só, o feedback da outra ficaria invisível. 
@@ -547,6 +552,141 @@ if ($this->input->post('rdap') !== null) {
                 <div class="col-md-4">
                   <button type="submit" class="btn btn-primary w-100">
                     <i class="mdi mdi-content-save"></i> SALVAR MONITORAMENTO
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+
+          <?php
+          // O switch precisa distinguir "desmarcado" de "campo ausente", e
+          // checkbox desmarcado simplesmente não é enviado pelo navegador — daí
+          // o hidden na frente, mesmo truque do filtro do Bom Controle na
+          // listagem de clientes.
+          $contratosAtivo = $contratos_aviso_ativo;
+          $postadoContratos = $this->input->post('contratos');
+          if (is_array($postadoContratos)) {
+            $contratosAtivo = (isset($postadoContratos['contratos_aviso_ativo']) && $postadoContratos['contratos_aviso_ativo'] === '1');
+          }
+
+          $contratosUsuarios = $contratos_usuarios_marcados;
+          if (is_array($postadoContratos)) {
+            $contratosUsuarios = isset($postadoContratos['contratos_aviso_usuarios'])
+              ? array_map('intval', (array) $postadoContratos['contratos_aviso_usuarios']) : [];
+          }
+
+          $contratosMarcados = $contratos_eventos_marcados;
+          if (is_array($postadoContratos)) {
+            $contratosMarcados = isset($postadoContratos['contratos_aviso_eventos'])
+              ? (array) $postadoContratos['contratos_aviso_eventos'] : [];
+          }
+          ?>
+          <div class="tab-pane <?php if ($tabsDefault === 'tab_contratos') echo 'active'; ?>" id="tab_contratos" role="tabpanel">
+            <form method="POST" action="<?php echo base_url('parametros_gerais/post_contratos'); ?>" class="mt-3">
+              <?php // O `.alert` do tema é `display: flex`, então cada filho vira um flex
+              // item: sem o `.alert-message` em volta, todo <strong> quebra numa coluna
+              // própria e o espaço em volta dele some. É o padrão do AppStack. ?>
+              <div class="alert alert-info p-2" role="alert">
+                <div class="alert-message">
+                  Toda mudança de estado de um contrato — criação, suspensão, reativação, encerramento, reabertura e
+                  exclusão — fica registrada na aba <strong>Históricos</strong> do próprio contrato, com data, autor e
+                  <strong>origem</strong> (painel, importação ou rotina automática). Este bloco decide quem é avisado
+                  por e-mail e de quais eventos. O envio é enfileirado e sai pelo "cron_enviar_email", que já roda.
+                </div>
+              </div>
+
+              <div class="row g-3">
+                <div class="col-12">
+                  <input type="hidden" name="contratos[contratos_aviso_ativo]" value="0">
+                  <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" role="switch" id="contratos_aviso_ativo" name="contratos[contratos_aviso_ativo]" value="1" <?php echo $contratosAtivo ? 'checked' : ''; ?>>
+                    <label class="form-check-label" for="contratos_aviso_ativo">Avisar por e-mail as mudanças de estado</label>
+                  </div>
+                  <small class="text-muted">Desligado, o histórico continua sendo gravado — só o e-mail deixa de sair.</small>
+                </div>
+
+                <div class="col-md-12">
+                  <?php // O `for` só é emitido quando o select existe: apontar para um id
+                  // ausente deixa o clique no rótulo sem efeito nenhum. ?>
+                  <label class="form-label d-block" <?php echo empty($contratos_usuarios) ? '' : 'for="contratos_aviso_usuarios"'; ?>>Quem recebe o aviso</label>
+
+                  <?php if (empty($contratos_usuarios)) { ?>
+                    <div class="alert alert-warning p-2 mb-1" role="alert">
+                      <div class="alert-message">
+                        Nenhum usuário ativo tem e-mail cadastrado. O aviso vai para o e-mail da empresa até que
+                        algum usuário seja selecionado aqui.
+                      </div>
+                    </div>
+                  <?php } else { ?>
+                    <?php // O `$(".select2").select2()` do footer roda no ready e pega este
+                    // select pela classe — não há inicialização própria aqui. O `width: 100%`
+                    // é necessário: sem ele o select2 mede o elemento já escondido pela aba
+                    // inativa e nasce com alguns pixels de largura. ?>
+                    <select class="form-control select2 select2-multiple" multiple
+                            id="contratos_aviso_usuarios"
+                            name="contratos[contratos_aviso_usuarios][]"
+                            style="width: 100%;"
+                            data-placeholder="Selecione os usuários que receberão o aviso">
+                      <?php foreach ($contratos_usuarios as $u) {
+                        // Nome E e-mail no rótulo: é o e-mail que vai receber, e quem escolhe
+                        // precisa conferir sem abrir o cadastro do usuário — no dropdown e no
+                        // chip do selecionado. A empresa entra só quando há mais de uma, senão
+                        // é a mesma palavra repetida em toda linha.
+                        $rotulo = (string) $u->name . ' — ' . (string) $u->email;
+                        if (!empty($contratos_multiempresa)) {
+                          $rotulo .= ' (' . (string) $u->company_byname . ')';
+                        }
+                        ?>
+                        <option value="<?php echo (int) $u->id; ?>" <?php echo in_array((int) $u->id, $contratosUsuarios, TRUE) ? 'selected' : ''; ?>>
+                          <?php echo htmlspecialchars($rotulo, ENT_QUOTES, 'UTF-8'); ?>
+                        </option>
+                      <?php } ?>
+                    </select>
+                  <?php } ?>
+
+                  <small class="form-text text-muted d-block mt-2">
+                    A lista traz os usuários <strong>ativos com e-mail cadastrado</strong> — o endereço vem do
+                    cadastro de cada um, então trocar o e-mail no perfil já vale no próximo aviso, e usuário
+                    inativado sai da lista sozinho. Sem ninguém selecionado, o aviso vai para o e-mail da empresa.
+                  </small>
+                  <small class="form-text text-muted d-block">
+                    <i class="mdi mdi-account-check-outline"></i>
+                    <strong>Quem executou a ação não recebe o próprio aviso</strong> — ele já viu a confirmação na
+                    tela. No resumo da importação a regra só vale para quem executou <em>todas</em> as mudanças do
+                    e-mail.
+                  </small>
+                  <small class="form-text text-muted d-block">
+                    É um aviso <strong>interno</strong>: o cliente nunca o recebe — quem avisa o cliente sobre
+                    boleto e nota fiscal é o bloco "Notificações ao cliente" da tela do contrato.
+                  </small>
+                </div>
+
+                <div class="col-md-12">
+                  <label class="form-label d-block">Eventos que geram e-mail</label>
+                  <div class="row g-2">
+                    <?php foreach ($contratos_eventos as $evSlug => $evMeta) { ?>
+                      <div class="col-md-4">
+                        <div class="form-check">
+                          <input class="form-check-input" type="checkbox" id="ev_<?php echo htmlspecialchars($evSlug, ENT_QUOTES, 'UTF-8'); ?>" name="contratos[contratos_aviso_eventos][]" value="<?php echo htmlspecialchars($evSlug, ENT_QUOTES, 'UTF-8'); ?>" <?php echo in_array($evSlug, $contratosMarcados, TRUE) ? 'checked' : ''; ?>>
+                          <label class="form-check-label" for="ev_<?php echo htmlspecialchars($evSlug, ENT_QUOTES, 'UTF-8'); ?>">
+                            <?php echo htmlspecialchars($evMeta['rotulo'], ENT_QUOTES, 'UTF-8'); ?>
+                          </label>
+                        </div>
+                      </div>
+                    <?php } ?>
+                  </div>
+                  <small class="form-text text-muted">
+                    Todos são registrados no histórico; só os marcados viram e-mail. A importação do gestor-interno
+                    manda <strong>um resumo</strong> no fim da rodada, e não uma mensagem por contrato — uma execução
+                    reescreve centenas de linhas.
+                  </small>
+                </div>
+              </div>
+
+              <div class="row mt-4">
+                <div class="col-md-4">
+                  <button type="submit" class="btn btn-primary w-100">
+                    <i class="mdi mdi-content-save"></i> SALVAR CONTRATOS
                   </button>
                 </div>
               </div>

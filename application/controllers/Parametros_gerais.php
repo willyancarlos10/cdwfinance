@@ -5,7 +5,7 @@ defined('BASEPATH') or exit('No direct script access allowed');
 class Parametros_gerais extends MY_Controller
 {
   /** Abas aceitas em ?tab= — valor fora daqui deixaria a tela sem aba ativa. */
-  const TABS = ['tab_email', 'tab_ninjas', 'tab_rdap', 'tab_faturamento', 'tab_monitoramento'];
+  const TABS = ['tab_email', 'tab_ninjas', 'tab_rdap', 'tab_faturamento', 'tab_monitoramento', 'tab_contratos'];
 
   public function __construct()
   {
@@ -428,6 +428,75 @@ class Parametros_gerais extends MY_Controller
     redirect(base_url('parametros_gerais?tab=tab_monitoramento'));
   }
 
+  /**
+   * Aviso por e-mail das mudanças de estado do contrato.
+   *
+   * Os destinatários são INTERNOS (a equipe). Não se confundem com o bloco
+   * "Notificações ao cliente" da tela do contrato (migration 033), que é quem
+   * recebe boleto e nota fiscal: ninguém de fora pode ser avisado de que o
+   * próprio contrato foi suspenso.
+   */
+  public function post_contratos()
+  {
+    $input = $this->input->post('contratos');
+    if (!is_array($input)) {
+      $input = [];
+    }
+
+    $this->load->model('contract_history_model');
+
+    // Os destinatários são USUÁRIOS do sistema, não e-mails digitados: o
+    // endereço já está no cadastro de cada um, e um campo de texto ao lado dele
+    // criaria uma segunda verdade que envelhece em silêncio.
+    //
+    // Só id que corresponde a um usuário oferecido pela tela é aceito. Id
+    // forjado no POST — ou de usuário inativo, sem e-mail, ou com e-mail
+    // malformado — é descartado aqui e de novo na hora do envio: gravar um id
+    // que a rotina depois ignora deixaria a tela mostrando um destinatário que
+    // nunca recebe nada.
+    $permitidos = [];
+    foreach ($this->contract_history_model->usuariosDisponiveis() as $usuario) {
+      $permitidos[(int) $usuario->id] = TRUE;
+    }
+
+    $marcadosUsuarios = isset($input['contratos_aviso_usuarios']) ? (array) $input['contratos_aviso_usuarios'] : [];
+    $usuarios = [];
+    foreach ($marcadosUsuarios as $idUsuario) {
+      $idUsuario = (int) $idUsuario;
+      if (isset($permitidos[$idUsuario])) $usuarios[] = $idUsuario;
+    }
+
+    // Os eventos vêm como checkboxes e são validados contra o catálogo: slug
+    // forjado no POST viraria uma chave que nada dispara, e o usuário veria a
+    // opção marcada sem nunca receber o e-mail.
+    $catalogo = $this->contract_history_model->eventos();
+    $marcados = isset($input['contratos_aviso_eventos']) ? (array) $input['contratos_aviso_eventos'] : [];
+    $eventos = [];
+    foreach ($marcados as $slug) {
+      $slug = trim((string) $slug);
+      if (array_key_exists($slug, $catalogo)) $eventos[] = $slug;
+    }
+
+    $this->general_settings_model->saveGroup('contratos', [
+      'contratos_aviso_ativo' => (isset($input['contratos_aviso_ativo']) && $input['contratos_aviso_ativo'] === '1') ? '1' : '0',
+      'contratos_aviso_usuarios' => implode(',', array_unique($usuarios)),
+      // String vazia é um valor legítimo aqui ("registrar tudo, não avisar de
+      // nada") e precisa ser distinguível da chave AUSENTE, que significa
+      // "nunca configurado" e cai nos padrões do catálogo.
+      'contratos_aviso_eventos' => implode(',', array_unique($eventos)),
+    ], (int) $this->session->userdata('user')->id);
+
+    // Sem ninguém marcado o aviso ainda sai — vai para o e-mail da empresa.
+    // Dizer isso aqui evita que a tela pareça ter salvo "não avisar ninguém".
+    if (empty($usuarios)) {
+      $this->session->set_flashdata('warning', 'Parâmetros salvos. Como nenhum usuário foi selecionado, o aviso vai para o e-mail cadastrado na empresa.');
+    } else {
+      $this->session->set_flashdata('success', 'Parâmetros de contratos salvos.');
+    }
+
+    redirect(base_url('parametros_gerais?tab=tab_contratos'));
+  }
+
   private function resolveTabDefault()
   {
     $tab = (string) $this->input->get('tab');
@@ -486,6 +555,22 @@ class Parametros_gerais extends MY_Controller
       'monitoramento_ssl_dias_aviso' => $this->site_monitor_model->diasAvisoSsl(),
       'monitoramento_email_destinatarios' => '',
     ];
+
+    // Contratos: o aviso de mudança de estado. Sem chave gravada, os eventos
+    // caem nos `padrao` do catálogo — a tela precisa mostrar exatamente o que a
+    // rotina faria hoje, senão o primeiro SALVAR gravaria "nada marcado" por
+    // cima de um aviso que já estava funcionando.
+    $this->load->model('contract_history_model');
+    $this->data['contratos_eventos'] = $this->contract_history_model->eventos();
+    $this->data['contratos_eventos_marcados'] = $this->contract_history_model->eventosAvisados();
+    $this->data['contratos_aviso_ativo'] = $this->contract_history_model->avisoAtivo();
+    $this->data['contratos_usuarios'] = $this->contract_history_model->usuariosDisponiveis();
+    $this->data['contratos_usuarios_marcados'] = $this->contract_history_model->usuariosAvisados();
+    // Só para a nota do rodapé: com mais de uma empresa na lista, a tela
+    // precisa dizer de qual empresa é cada usuário.
+    $this->data['contratos_multiempresa'] = count(array_unique(array_map(function ($u) {
+      return (int) $u->id_company;
+    }, $this->data['contratos_usuarios']))) > 1;
 
     $this->load->library('secret_crypto');
     $this->data['crypto_ready'] = $this->secret_crypto->isReady();

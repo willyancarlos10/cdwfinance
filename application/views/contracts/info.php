@@ -65,6 +65,9 @@ $temEspaco = ((float) $result->space_gb) > 0;
       <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#modal_encerrar"><i class="mdi mdi-close-circle-outline"></i> ENCERRAR CONTRATO</button>
       <form method="POST" id="form_excluir_contrato" action="<?php echo base_url('contratos/post_excluir'); ?>" class="d-inline">
         <input type="hidden" name="id" value="<?php echo (int) $result->id; ?>">
+        <?php // Preenchido pelo Swal da confirmação: o contrato deixa de existir,
+        // e o motivo digitado ali é o que sobra no histórico para explicar por quê. ?>
+        <input type="hidden" name="comments" id="campo_motivo_exclusao" value="">
         <button type="button" class="btn btn-outline-danger" id="btn_excluir_contrato"><i class="fa fa-trash"></i> EXCLUIR CONTRATO</button>
       </form>
     <?php } ?>
@@ -134,7 +137,12 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
       ?>
       <?php if (!empty($faturas_count)) { ?><span class="badge bg-secondary ms-1"><?php echo (int) $faturas_count; ?></span><?php } ?>
     </a></li>
-  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab_historicos" role="tab">Históricos</a></li>
+  <li class="nav-item">
+    <a class="nav-link" data-bs-toggle="tab" href="#tab_historicos" role="tab">
+      Históricos<?php // Mesma regra do badge de Faturas: zero não vira selo.
+                  if (!empty($history)) { ?><span class="badge bg-secondary ms-1"><?php echo count($history); ?></span><?php } ?>
+    </a>
+  </li>
 </ul>
 
 <div class="tab-content pt-3">
@@ -237,8 +245,20 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
               </h5>
               <p class="text-muted mb-3 lh-1"><small>Define quem gera as cobranças deste contrato e como elas são emitidas.</small></p>
             </div>
+            <?php // DUAS camadas, e as duas são necessárias:
+                  //
+                  //  - o `if` do PHP responde pelo estado SALVO: contrato do Bom
+                  //    Controle nunca renderiza os botões;
+                  //  - o `bloco-cdw` responde ao SELECT: trocar "Quem fatura" para o
+                  //    ERP some com eles na hora, sem esperar o SALVAR. Sem isso os
+                  //    botões continuavam à mostra prometendo uma ação que o servidor
+                  //    ia recusar.
+                  //
+                  // A recusa no servidor continua existindo nos três (generateNow,
+                  // Charge_model::lancar e json_postavisarreajuste): esconder botão
+                  // não protege endpoint. ?>
             <?php if ($faturaAqui) { ?>
-              <div class="col-auto text-end">
+              <div class="col-auto text-end bloco-cdw">
                 <button type="button" class="btn btn-outline-primary" id="btn_gerar_fatura"><i class="mdi mdi-file-plus-outline"></i> GERAR FATURA</button>
                 <button type="button" class="btn btn-outline-primary" id="btn_lancar_cobranca" data-bs-toggle="modal" data-bs-target="#modal_cobranca"><i class="mdi mdi-cart-plus"></i> LANÇAR COBRANÇA</button>
                 <?php if ($temReajuste && !empty($result->next_adjustment)) { ?>
@@ -758,11 +778,111 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
   <div class="tab-pane fade" id="tab_historicos" role="tabpanel">
     <div class="card flex-fill">
       <div class="card-body py-3">
-        <div class="text-center text-muted py-5">
-          <i class="mdi mdi-history fs-1 d-block mb-2"></i>
-          <h5 class="mb-1">Históricos <span class="badge bg-secondary">Em breve</span></h5>
-          <p class="mb-0">Alterações e eventos deste contrato.</p>
-        </div>
+        <?php
+        // Cores por severidade do evento, no mesmo vocabulário dos selos de
+        // situação usados na listagem de clientes e no card do Dashboard —
+        // três vocabulários para o mesmo estado fariam a mesma mudança parecer
+        // coisas diferentes conforme a tela.
+        $histCores = [
+          'critico' => ['badge' => 'bg-danger', 'borda' => 'border-danger'],
+          'alerta' => ['badge' => 'bg-warning text-dark', 'borda' => 'border-warning'],
+          'info' => ['badge' => 'bg-secondary', 'borda' => 'border-secondary'],
+        ];
+        ?>
+
+        <?php if (empty($history)) { ?>
+          <div class="text-center text-muted py-5">
+            <i class="mdi mdi-history fs-1 d-block mb-2"></i>
+            <h5 class="mb-1">Sem histórico ainda</h5>
+            <p class="mb-0">
+              As mudanças de estado deste contrato — suspensão, reativação, encerramento e exclusão —
+              passam a ser registradas aqui, com a data, o autor e a origem.
+            </p>
+          </div>
+        <?php } else { ?>
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <h5 class="mb-0">Histórico de alterações</h5>
+            <span class="text-muted small"><?php echo count($history); ?> registro(s)</span>
+          </div>
+
+          <div class="timeline">
+            <?php foreach ($history as $h) {
+              $meta = isset($history_events[$h->event]) ? $history_events[$h->event] : ['rotulo' => $h->event, 'severidade' => 'info'];
+              $cor = isset($histCores[$meta['severidade']]) ? $histCores[$meta['severidade']] : $histCores['info'];
+              $origem = isset($history_origins[$h->origin]) ? $history_origins[$h->origin] : $h->origin;
+              // A origem só vira selo quando NÃO é o painel: "Painel" em toda
+              // linha é ruído, e o que importa destacar é justamente a mudança
+              // que não partiu de alguém clicando.
+              $origemDestaque = ((string) $h->origin !== 'painel');
+              ?>
+              <div class="border-start border-3 <?php echo $cor['borda']; ?> ps-3 pb-3 mb-1">
+                <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+                  <span class="badge <?php echo $cor['badge']; ?>"><?php echo htmlspecialchars($meta['rotulo'], ENT_QUOTES, 'UTF-8'); ?></span>
+
+                  <?php if (!empty($h->status_from) && !empty($h->status_to)) { ?>
+                    <span class="text-muted small">
+                      <?php echo htmlspecialchars($h->status_from, ENT_QUOTES, 'UTF-8'); ?>
+                      <i class="mdi mdi-arrow-right"></i>
+                      <?php echo htmlspecialchars($h->status_to, ENT_QUOTES, 'UTF-8'); ?>
+                    </span>
+                  <?php } ?>
+
+                  <?php if ($origemDestaque) { ?>
+                    <span class="badge bg-dark" title="Mudança que não partiu do painel">
+                      <i class="mdi mdi-robot"></i> <?php echo htmlspecialchars($origem, ENT_QUOTES, 'UTF-8'); ?>
+                    </span>
+                  <?php } ?>
+
+                  <?php if (!empty($h->notified)) { ?>
+                    <span class="badge bg-light text-muted border" title="Aviso por e-mail enfileirado em <?php echo date('d/m/Y H:i', strtotime($h->notified)); ?>">
+                      <i class="mdi mdi-email-check-outline"></i> avisado
+                    </span>
+                  <?php } ?>
+                </div>
+
+                <div class="text-muted small mb-1">
+                  <i class="mdi mdi-clock-outline"></i>
+                  <?php echo date('d/m/Y \à\s H:i', strtotime($h->created)); ?>
+                  <?php if (!empty($h->created_user)) { ?>
+                    &middot; <?php echo htmlspecialchars($h->created_user, ENT_QUOTES, 'UTF-8'); ?>
+                  <?php } ?>
+                </div>
+
+                <?php if (!empty($h->reason)) {
+                  // Cai no próprio slug quando o motivo saiu do catálogo — o
+                  // carimbo histórico não pode perder o porquê junto (032).
+                  $rotuloMotivo = isset($end_reasons[$h->reason]) ? $end_reasons[$h->reason] : $h->reason;
+                  ?>
+                  <div class="small mb-1">
+                    <strong>Motivo:</strong> <?php echo htmlspecialchars($rotuloMotivo, ENT_QUOTES, 'UTF-8'); ?>
+                  </div>
+                <?php } ?>
+
+                <?php if (!empty($h->comments)) { ?>
+                  <div class="small mb-1"><?php echo nl2br(htmlspecialchars($h->comments, ENT_QUOTES, 'UTF-8')); ?></div>
+                <?php } ?>
+
+                <?php if (!empty($h->detail)) { ?>
+                  <div class="text-muted small"><?php echo htmlspecialchars($h->detail, ENT_QUOTES, 'UTF-8'); ?></div>
+                <?php } ?>
+              </div>
+            <?php } ?>
+          </div>
+
+          <?php // `.alert-message` obrigatório: o `.alert` do tema é `display: flex` e,
+          // sem ele, cada <strong> vira um flex item — quebra em coluna e come o
+          // espaço em volta. ?>
+          <div class="alert alert-info p-2 mt-3 mb-0 small" role="alert">
+            <div class="alert-message">
+              <i class="mdi mdi-information-outline"></i>
+              Só as mudanças de <strong>estado</strong> entram aqui (criação, suspensão, reativação, encerramento,
+              reabertura e exclusão). Edições de valor, ciclo ou faturamento não são registradas — o reajuste tem
+              histórico próprio, no bloco de Faturamento.
+              Quem recebe o aviso por e-mail dessas mudanças é configurado em
+              <strong>Parâmetros gerais &rsaquo; Contratos</strong>.
+            </div>
+          </div>
+        <?php } ?>
       </div>
     </div>
   </div>
@@ -1282,17 +1402,31 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
     });
 
     $('#btn_excluir_contrato').on('click', function() {
+      // O motivo é OPCIONAL e vai para o histórico, que sobrevive à exclusão
+      // (a linha guarda o rótulo do contrato copiado). Sem ele, o registro diz
+      // que o contrato foi apagado mas não por quê — e não há mais nada para
+      // consultar depois.
       Swal.fire({
         title: 'Excluir contrato?',
-        html: 'O contrato <strong>#<?php echo (int) $result->id; ?></strong> e seus documentos serão excluídos <strong>definitivamente</strong>.<br><small>Esta ação não pode ser desfeita.</small>',
+        html: 'O contrato <strong>#<?php echo (int) $result->id; ?></strong> e seus documentos serão excluídos <strong>definitivamente</strong>.<br><small>Esta ação não pode ser desfeita. O registro da exclusão fica no histórico.</small>',
         icon: 'warning',
+        input: 'textarea',
+        inputLabel: 'Motivo da exclusão (opcional)',
+        inputPlaceholder: 'Ex.: contrato lançado em duplicidade',
+        inputAttributes: { maxlength: 500 },
         showCancelButton: true,
         confirmButtonColor: '#d33',
         cancelButtonColor: '#ccc',
         cancelButtonText: 'Cancelar',
         confirmButtonText: 'Excluir'
       }).then(function(result) {
-        if (result.value) $('#form_excluir_contrato').submit();
+        // `result.value` é a string do input e vem VAZIA quando o usuário
+        // confirma sem digitar nada — testar a verdade dela cancelaria a
+        // exclusão de quem não quis dar motivo. Quem diz se foi confirmado é
+        // `isConfirmed`.
+        if (!result.isConfirmed) return;
+        $('#campo_motivo_exclusao').val(result.value || '');
+        $('#form_excluir_contrato').submit();
       });
     });
 

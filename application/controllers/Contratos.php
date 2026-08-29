@@ -83,6 +83,13 @@ class Contratos extends MY_Controller
     }
     $this->db->trans_commit();
 
+    // Fora da transação de propósito: o histórico é trilha do que aconteceu, e
+    // uma falha ao gravá-lo não pode desfazer um contrato que já existe.
+    $this->load->model('contract_history_model');
+    $this->contract_history_model->registrar((int) $idContract, 'criado', $idUser, [
+      'status_to' => 'vigente',
+    ]);
+
     $this->session->set_flashdata('success', 'Contrato criado com sucesso.');
     redirect(base_url('contratos/info?id=' . (int) $idContract));
   }
@@ -212,6 +219,14 @@ class Contratos extends MY_Controller
       'desc',
       FALSE
     );
+
+    // Aba Históricos. Vem direto, sem AJAX nem paginação: são poucas dezenas de
+    // linhas mesmo num contrato antigo (bem diferente das faturas, que crescem
+    // uma por competência para sempre).
+    $this->load->model('contract_history_model');
+    $this->data['history'] = $this->contract_history_model->listarPorContrato($id, (int) $this->getCurrentCompanyId());
+    $this->data['history_events'] = $this->contract_history_model->eventos();
+    $this->data['history_origins'] = $this->contract_history_model->origens();
 
     // Sugestões para quem ainda não configurou: dia de vencimento do parâmetro
     // global e o próximo aniversário do contrato que ainda não passou.
@@ -846,6 +861,17 @@ class Contratos extends MY_Controller
       return;
     }
 
+    // O `Adjustment_model` declara que só toca contrato `cdwfinance`, e as
+    // filas do cron filtram por isso — mas ESTE caminho recebe o contrato
+    // pronto do POST e não passava por filtro nenhum. Sem a guarda, um POST
+    // direto mandaria ao cliente um aviso de reajuste que este sistema não vai
+    // aplicar: quem reajusta contrato do ERP é o ERP. Esconder o botão na tela
+    // não basta — o endpoint aceita POST direto (mesma lição do post_status).
+    if ((string) $contrato->billing_source !== 'cdwfinance') {
+      echo json_encode($this->jsonErro('Este contrato é faturado pelo Bom Controle — o reajuste dele é gerido lá.'));
+      return;
+    }
+
     if ((string) $contrato->adjustment_index === 'nenhum' || empty($contrato->next_adjustment)) {
       echo json_encode($this->jsonErro('Este contrato não tem reajuste configurado.'));
       return;
@@ -993,6 +1019,21 @@ class Contratos extends MY_Controller
       'modified_by' => (int) $this->session->userdata('user')->id,
     ], 'id', $id);
 
+    // O `modified`/`modified_by` acima guarda só a ÚLTIMA alteração — suspender
+    // e reativar no mesmo dia apagaria a suspensão. A trilha que responde
+    // "quando e por quem" é esta, e é ela que dispara o aviso por e-mail.
+    $this->load->model('contract_history_model');
+    $this->contract_history_model->registrar(
+      $contrato,
+      $acao === 'suspender' ? 'suspenso' : 'reativado',
+      (int) $this->session->userdata('user')->id,
+      [
+        'status_from' => $transicoes[$acao]['de'],
+        'status_to' => $transicoes[$acao]['para'],
+        'detail' => $this->detalheSuspensao($suspensao),
+      ]
+    );
+
     $this->session->set_flashdata('success', $transicoes[$acao]['ok'] . $this->resumoSuspensao($suspensao));
 
     $aviso = $this->avisoSuspensao($suspensao);
@@ -1124,6 +1165,20 @@ class Contratos extends MY_Controller
     }
     $this->db->trans_commit();
 
+    $detalhe = $this->detalheSuspensao($suspensao);
+    if (!empty($desvincular)) {
+      $detalhe = trim($detalhe . ' ' . count($desvincular) . ' domínio(s) desvinculado(s).');
+    }
+
+    $this->load->model('contract_history_model');
+    $this->contract_history_model->registrar($contrato, 'encerrado', $idUser, [
+      'status_from' => (string) $contrato->status,
+      'status_to' => 'encerrado',
+      'reason' => $motivo,
+      'comments' => $observacoes,
+      'detail' => $detalhe,
+    ]);
+
     $mensagem = 'Contrato encerrado.' . $this->resumoSuspensao($suspensao);
     if (!empty($desvincular)) {
       $mensagem .= ' ' . count($desvincular) . ' domínio(s) desvinculado(s) da conta de servidor.';
@@ -1172,6 +1227,16 @@ class Contratos extends MY_Controller
       'modified_by' => (int) $this->session->userdata('user')->id,
     ], 'id', $id);
 
+    // O motivo e as observações do encerramento acabaram de ser apagados da
+    // `crm_contracts` — o histórico é o único lugar onde eles continuam
+    // existindo depois da reabertura.
+    $this->load->model('contract_history_model');
+    $this->contract_history_model->registrar($contrato, 'reaberto', (int) $this->session->userdata('user')->id, [
+      'status_from' => 'encerrado',
+      'status_to' => 'vigente',
+      'detail' => 'As contas dos painéis NÃO foram reativadas — reabrir corrige o registro, não o serviço.',
+    ]);
+
     $this->session->set_flashdata('success', 'Contrato reaberto. O registro do encerramento foi apagado.');
     redirect(base_url('contratos/info?id=' . $id));
   }
@@ -1190,6 +1255,41 @@ class Contratos extends MY_Controller
    * @param  array $resultado
    * @return string
    */
+  /**
+   * O mesmo resumo, em texto seco, para a coluna `detail` do histórico.
+   *
+   * Não reusa o `resumoSuspensao()`: aquele é um trecho para ser COLADO no fim
+   * de uma frase de sucesso (começa com espaço e conector) e, gravado no
+   * histórico, produziria linhas que começam no meio de uma oração. O que os
+   * dois têm de comum é a fonte — os contadores do resultado —, não a redação.
+   *
+   * Contas bloqueadas entram aqui: elas não impedem a operação, então somem da
+   * tela assim que o operador fecha o alerta, e é no histórico que ficam sendo
+   * a explicação de por que uma conta continuou no ar.
+   *
+   * @param  array $resultado saída de Server_model::suspendContractAccounts()
+   * @return string
+   */
+  private function detalheSuspensao(array $resultado)
+  {
+    $partes = [];
+
+    if ((int) $resultado['contas_ok'] > 0) {
+      $partes[] = (int) $resultado['contas_ok'] . ' conta(s) '
+        . ($resultado['acao'] === 'suspender' ? 'suspensa(s)' : 'reativada(s)') . ' nos painéis';
+    }
+
+    if (!empty($resultado['bloqueados'])) {
+      $partes[] = count($resultado['bloqueados']) . ' conta(s) mantida(s) no ar por serem compartilhadas com outro contrato vigente';
+    }
+
+    if (empty($partes)) {
+      $partes[] = 'Nenhuma conta de painel foi afetada.';
+    }
+
+    return mb_substr(implode('. ', $partes) . '.', 0, 500);
+  }
+
   private function resumoSuspensao(array $resultado)
   {
     $partes = [];
@@ -1388,7 +1488,24 @@ class Contratos extends MY_Controller
       if (!empty($arquivo->file)) $caminhos[] = FCPATH . $arquivo->file;
     }
 
+    $motivoExclusao = trim((string) $this->input->post('comments'));
+
     $this->db->trans_begin();
+
+    // O registro vem ANTES dos deletes, e DENTRO da transação, por dois
+    // motivos que se somam:
+    //  - depois do DELETE a FK `ON DELETE SET NULL` já zerou `id_contract`, e
+    //    inserir com um id que não existe mais violaria a constraint;
+    //  - na transação, um rollback leva a linha junto — sem isso o histórico
+    //    afirmaria uma exclusão que não aconteceu.
+    // O rótulo e o cliente ficam denormalizados na própria linha, então ela
+    // continua legível depois de o contrato deixar de existir.
+    $this->load->model('contract_history_model');
+    $this->contract_history_model->registrar($contrato, 'excluido', (int) $this->session->userdata('user')->id, [
+      'status_from' => (string) $contrato->status,
+      'comments' => $motivoExclusao,
+      'detail' => count($caminhos) > 0 ? count($caminhos) . ' documento(s) apagado(s) junto.' : NULL,
+    ]);
 
     // Documentos e domínios saem junto; o N:N de tipos cascateia pela FK.
     $this->db->where('id_contract', $id);
