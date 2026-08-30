@@ -1778,6 +1778,179 @@ class Contratos extends MY_Controller
   }
 
   /**
+   * Dados da conta de servidor para abrir o modal de cota.
+   *
+   * Lê do banco, sem ir à rede: o retrato da última sincronização basta para
+   * mostrar uso e capacidade, e uma consulta ao painel deixaria o operador
+   * esperando a cada abertura do modal. A data da sincronização vai junto,
+   * para ele saber de quando é o número que está vendo.
+   *
+   * Responde para QUALQUER tipo de painel — inclusive os que não aceitam
+   * alteração. É o modal que explica a incompatibilidade, com o motivo vindo
+   * de `Server_model::quotaSuportada()`, o mesmo que o endpoint de gravação
+   * usa para recusar; assim a tela nunca promete o que o servidor não faz.
+   */
+  public function json_postquotaconta()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $idDominio = (int) $this->input->post('id');
+    if ($idDominio <= 0) {
+      echo json_encode($this->jsonErro('ID inválido.', ['id' => 'ID inválido.']));
+      return;
+    }
+
+    $this->load->model('server_model');
+    $conta = $this->server_model->getContractAccount($idDominio, (int) $this->getCurrentCompanyId());
+
+    if ($conta === NULL) {
+      echo json_encode($this->jsonErro('Domínio não encontrado.', ['id' => 'Domínio não encontrado.']));
+      return;
+    }
+
+    if (empty($conta->id_server_domain)) {
+      echo json_encode([
+        'success' => TRUE,
+        'return' => TRUE,
+        'message' => '',
+        'data' => [
+          'domain' => $conta->domain,
+          'vinculado' => FALSE,
+          'compativel' => FALSE,
+          'motivo' => 'Este domínio não está vinculado a nenhuma conta de servidor, então não há cota a alterar.'
+            . ' Exclua e cadastre o domínio de novo para que a busca encontre a conta.',
+        ],
+        'errors' => [],
+      ]);
+      return;
+    }
+
+    $suporte = $this->server_model->quotaSuportada($conta->server_type);
+    $limite = ($conta->disk_limit_mb === NULL || $conta->disk_limit_mb === '') ? NULL : (float) $conta->disk_limit_mb;
+
+    echo json_encode([
+      'success' => TRUE,
+      'return' => TRUE,
+      'message' => '',
+      'data' => [
+        'domain' => $conta->domain,
+        'vinculado' => TRUE,
+        'server_domain' => $conta->server_domain,
+        'server_name' => $conta->server_name,
+        'server_type' => $conta->server_type,
+        'owner_username' => $conta->owner_username,
+        'plan' => $conta->plan,
+        'disk_used_mb' => $conta->disk_used_mb === NULL ? NULL : (float) $conta->disk_used_mb,
+        'disk_limit_mb' => $limite,
+        // Gb com 2 casas é o que o campo do formulário recebe; a tela inteira
+        // fala Gb e só o servidor converte para MB.
+        'disk_limit_gb' => $limite === NULL ? '' : rtrim(rtrim(number_format($limite / 1024, 2, '.', ''), '0'), '.'),
+        'last_sync' => empty($conta->last_sync) ? '' : date('d/m/Y H:i', strtotime($conta->last_sync)),
+        'space_gb' => (float) $conta->space_gb,
+        'encerrado' => ($conta->contract_status === 'encerrado'),
+        'compativel' => !empty($suporte['compativel']),
+        'motivo' => $suporte['motivo'],
+      ],
+      'errors' => [],
+    ]);
+  }
+
+  /**
+   * Aplica a nova cota no painel.
+   *
+   * As guardas rodam TODAS antes de tocar a rede: cota inválida, contrato
+   * encerrado e cota menor que o uso são recusas locais, e gastar uma chamada
+   * ao painel para descobrir isso seria pagar caro por uma pergunta que o
+   * banco responde.
+   *
+   * **Cota menor que o uso atual é recusada.** É a única trava dura da tela, e
+   * existe porque o efeito é imediato: a conta para de gravar, o site começa a
+   * dar erro e o e-mail deixa de ser entregue. Numa base em que 73 dos
+   * contratos vigentes já usam mais espaço do que contrataram, um zero a menos
+   * na digitação é um incidente, não um engano reversível.
+   *
+   * Não há trava contra o `space_gb`: a cota pode ficar abaixo do espaço
+   * contratado (é o caso normal quando o contrato tem mais de uma conta), e o
+   * contratado entra na tela só como referência.
+   */
+  public function json_postsalvarquota()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $idDominio = (int) $this->input->post('id');
+    if ($idDominio <= 0) {
+      echo json_encode($this->jsonErro('ID inválido.', ['id' => 'ID inválido.']));
+      return;
+    }
+
+    $this->load->model('server_model');
+    $idCompany = (int) $this->getCurrentCompanyId();
+    $conta = $this->server_model->getContractAccount($idDominio, $idCompany);
+
+    if ($conta === NULL) {
+      echo json_encode($this->jsonErro('Domínio não encontrado.', ['id' => 'Domínio não encontrado.']));
+      return;
+    }
+
+    if ($conta->contract_status === 'encerrado') {
+      echo json_encode($this->jsonErro('Contrato encerrado não pode ter a cota alterada — reabra o contrato antes.'));
+      return;
+    }
+
+    $ilimitado = ($this->input->post('unlimited') === 'S');
+    $cotaMb = NULL;
+
+    if (!$ilimitado) {
+      $bruto = trim((string) $this->input->post('quota_gb'));
+      if ($bruto === '') {
+        echo json_encode($this->jsonErro('Informe a capacidade.', ['quota_gb' => 'Informe a capacidade.']));
+        return;
+      }
+
+      $gb = (float) str_replace(',', '.', $bruto);
+      if ($gb <= 0) {
+        echo json_encode($this->jsonErro(
+          'A capacidade deve ser maior que zero. Para deixar a conta sem limite, marque "Ilimitado".',
+          ['quota_gb' => 'Valor inválido.']
+        ));
+        return;
+      }
+
+      $cotaMb = (int) round($gb * 1024);
+
+      $usado = ($conta->disk_used_mb === NULL) ? 0.0 : (float) $conta->disk_used_mb;
+      if ($usado > 0 && $cotaMb < $usado) {
+        echo json_encode($this->jsonErro(
+          'A conta já usa ' . number_format($usado / 1024, 2, ',', '.') . ' Gb, e a cota pedida é de '
+            . number_format($cotaMb / 1024, 2, ',', '.') . ' Gb. Aplicar deixaria a conta acima do limite'
+            . ' na hora: o site para de gravar e os e-mails deixam de ser entregues.',
+          ['quota_gb' => 'Menor que o uso atual.']
+        ));
+        return;
+      }
+    }
+
+    // A cota vai à rede: o painel pode demorar, e o teto do PHP não pode
+    // interromper a chamada no meio.
+    @set_time_limit(0);
+
+    $resultado = $this->server_model->setAccountQuota($idDominio, $idCompany, $cotaMb, (int) $this->session->userdata('user')->id);
+
+    if (empty($resultado['success'])) {
+      echo json_encode($this->jsonErro($resultado['message']));
+      return;
+    }
+
+    echo json_encode([
+      'success' => TRUE,
+      'return' => TRUE,
+      'message' => $resultado['message'],
+      'data' => $resultado['data'],
+      'errors' => [],
+    ]);
+  }
+
+  /**
    * O que ainda dá para cadastrar deste domínio neste contrato.
    *
    * O mesmo domínio pode estar em mais de um servidor do tenant — é o caso

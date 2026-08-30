@@ -615,7 +615,7 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
             <table class="table table-striped table-bordered table-hover">
               <thead>
                 <tr>
-                  <th class="text-center" style="width: 170px;">Ações</th>
+                  <th class="text-center" style="width: 210px;">Ações</th>
                   <th>Domínio</th>
                   <th class="text-center">Vínculo</th>
                   <th class="text-center">Em uso</th>
@@ -631,6 +631,7 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
                     <td align="center">
                       <button type="button" class="btn btn-sm btn-outline-secondary js-editar-dominio" data-id="<?php echo (int) $d->id; ?>" data-nome="<?php echo htmlspecialchars($d->domain, ENT_QUOTES, 'UTF-8'); ?>" data-vencimento="<?php echo !empty($d->due_date) ? date('d/m/Y', strtotime($d->due_date)) : ''; ?>" data-registro="<?php echo htmlspecialchars((string) $d->registrar, ENT_QUOTES, 'UTF-8'); ?>" data-gerenciado="<?php echo (int) $d->managed_cdw; ?>" data-observacoes="<?php echo htmlspecialchars((string) $d->comments, ENT_QUOTES, 'UTF-8'); ?>" title="Editar domínio"><i class="fa fa-edit"></i></button>
                       <button type="button" class="btn btn-sm btn-outline-primary js-whois-dominio" data-id="<?php echo (int) $d->id; ?>" data-dominio="<?php echo htmlspecialchars($d->domain, ENT_QUOTES, 'UTF-8'); ?>" title="Consultar WHOIS do domínio"><i class="fa fa-search"></i></button>
+                      <button type="button" class="btn btn-sm btn-outline-info js-quota-dominio" data-id="<?php echo (int) $d->id; ?>" data-nome="<?php echo htmlspecialchars($d->domain, ENT_QUOTES, 'UTF-8'); ?>" <?php echo empty($d->id_server_domain) ? 'disabled title="Domínio sem vínculo com conta de servidor — não há cota a alterar"' : 'title="Alterar cota de disco da conta"'; ?>><i class="mdi mdi-server"></i></button>
                       <button type="button" class="btn btn-sm btn-outline-danger js-excluir-dominio" data-id="<?php echo (int) $d->id; ?>" data-nome="<?php echo htmlspecialchars($d->domain, ENT_QUOTES, 'UTF-8'); ?>" data-servidor="<?php echo !empty($d->id_server_domain) ? htmlspecialchars((string) $d->server_name, ENT_QUOTES, 'UTF-8') : ''; ?>" title="Excluir domínio"><i class="fa fa-trash"></i></button>
                     </td>
                     <td><?php echo htmlspecialchars($d->domain, ENT_QUOTES, 'UTF-8'); ?></td>
@@ -968,6 +969,84 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
   <input type="hidden" name="id" value="<?php echo (int) $result->id; ?>">
   <input type="hidden" name="id_charge" id="cancelar_cobranca_id" value="">
 </form>
+
+<!-- modal cota da conta -->
+<div class="modal fade" id="modal_quota_conta" aria-hidden="true" style="display: none;">
+  <div class="modal-dialog modal-md" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">ALTERAR COTA DA CONTA</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body m-1" style="min-height:0;">
+
+        <div id="quota_carregando" class="text-center text-muted py-4">
+          <div class="spinner-border spinner-border-sm me-2" role="status"></div> Carregando os dados da conta...
+        </div>
+
+        <div id="quota_conteudo" class="d-none">
+          <div class="mb-3">
+            <div class="fw-bold" id="quota_dominio"></div>
+            <small class="text-muted" id="quota_conta_info"></small>
+          </div>
+
+          <div class="row text-center mb-3">
+            <div class="col-6">
+              <div class="border rounded py-2">
+                <small class="text-muted d-block">Em uso</small>
+                <span class="fw-bold" id="quota_uso">—</span>
+              </div>
+            </div>
+            <div class="col-6">
+              <div class="border rounded py-2">
+                <small class="text-muted d-block">Capacidade atual</small>
+                <span class="fw-bold" id="quota_atual">—</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Painel sem cota: o modal abre e explica, em vez de o botão sumir da
+               linha sem dizer por quê. -->
+          <div id="quota_incompativel" class="alert alert-warning d-none">
+            <div class="alert-message">
+              <i class="mdi mdi-information-outline"></i> <span id="quota_motivo"></span>
+            </div>
+          </div>
+
+          <div id="quota_formulario">
+            <div class="form-group mb-3">
+              <label class="form-label">Nova capacidade (Gb)</label>
+              <input type="number" min="0" step="0.01" class="form-control" id="quota_gb" value="" placeholder="Ex.: 10" data-mask="00,00">
+              <small class="text-muted" id="quota_referencia"></small>
+            </div>
+            <div class="form-group mb-3">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" role="switch" id="quota_ilimitado">
+                <label class="form-check-label" for="quota_ilimitado">Ilimitado (sem cota)</label>
+              </div>
+            </div>
+            <div class="alert alert-light border">
+              <div class="alert-message">
+                <small>A alteração vale para a <strong>conta inteira</strong> no painel — todos os domínios e
+                  subdomínios daquele usuário —, e passa a valer imediatamente.</small>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <div class="modal-footer">
+        <div class="col">
+          <button type="button" class="btn w-100 btn-primary" id="btn_salvar_quota" disabled><i class="mdi mdi-content-save"></i> SALVAR</button>
+        </div>
+        <div class="col"></div>
+        <div class="col">
+          <button type="button" class="btn w-100 btn-outline-secondary" data-bs-dismiss="modal"><i class="fa fa-times"></i> FECHAR</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- modal dominio -->
 <div class="modal fade" id="modal_dominio" aria-hidden="true" style="display: none;">
@@ -1707,6 +1786,169 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
           },
           complete: function() {
             $btn.prop('disabled', false);
+          }
+        });
+      });
+    });
+
+    // ----- cota da conta -----
+    // O id fica no escopo do bloco: o modal é preenchido por AJAX e o SALVAR
+    // precisa saber sobre qual linha está agindo sem reler o DOM.
+    var quotaIdDominio = 0;
+    var quotaSeq = 0;
+
+    function quotaGb(mb) {
+      if (mb === null || mb === undefined) return 'Ilimitado';
+      return (mb / 1024).toFixed(2).replace('.', ',') + ' Gb';
+    }
+
+    $(document).on('click', '.js-quota-dominio', function() {
+      var $btn = $(this);
+      quotaIdDominio = $btn.data('id');
+
+      // Estado inicial a cada abertura: sem isso o modal mostraria por um
+      // instante os dados da conta aberta antes desta.
+      var seq = ++quotaSeq;
+      $('#quota_carregando').removeClass('d-none');
+      $('#quota_conteudo').addClass('d-none');
+      $('#quota_incompativel').addClass('d-none');
+      $('#quota_formulario').removeClass('d-none');
+      $('#btn_salvar_quota').prop('disabled', true);
+      $('#quota_gb').val('');
+      $('#quota_ilimitado').prop('checked', false);
+
+      $('#modal_quota_conta').modal('show');
+
+      $.ajax({
+        type: 'POST',
+        url: '<?php echo base_url('contratos/json_postquotaconta'); ?>',
+        data: {
+          id: quotaIdDominio
+        },
+        dataType: 'json',
+        success: function(data) {
+          if (sessaoExpirou(data)) return;
+          // Cliques em duas linhas diferentes: a resposta lenta não pode
+          // sobrescrever a conta que o usuário está vendo agora.
+          if (seq !== quotaSeq) return;
+
+          if (!data || !data.return) {
+            $('#modal_quota_conta').modal('hide');
+            notificar('error', (data && data.message) ? data.message : 'Erro ao carregar os dados da conta.');
+            return;
+          }
+
+          var d = data.data;
+
+          $('#quota_carregando').addClass('d-none');
+          $('#quota_conteudo').removeClass('d-none');
+          $('#quota_dominio').text(d.domain);
+
+          if (!d.vinculado) {
+            $('#quota_conta_info').text('');
+            $('#quota_uso').text('—');
+            $('#quota_atual').text('—');
+            $('#quota_motivo').text(d.motivo);
+            $('#quota_incompativel').removeClass('d-none');
+            $('#quota_formulario').addClass('d-none');
+            return;
+          }
+
+          $('#quota_conta_info').text(
+            d.server_name + ' · conta ' + (d.owner_username || '(não informada)') +
+            (d.last_sync ? ' · sincronizado em ' + d.last_sync : '')
+          );
+          $('#quota_uso').text(d.disk_used_mb === null ? '—' : quotaGb(d.disk_used_mb));
+          $('#quota_atual').text(quotaGb(d.disk_limit_mb));
+
+          if (!d.compativel) {
+            $('#quota_motivo').text(d.motivo);
+            $('#quota_incompativel').removeClass('d-none');
+            $('#quota_formulario').addClass('d-none');
+            return;
+          }
+
+          if (d.encerrado) {
+            $('#quota_motivo').text('Contrato encerrado não pode ter a cota alterada — reabra o contrato antes.');
+            $('#quota_incompativel').removeClass('d-none');
+            $('#quota_formulario').addClass('d-none');
+            return;
+          }
+
+          // O contratado é referência, nunca valor sugerido: o contrato pode ter
+          // várias contas, e preencher o campo com ele levaria a atribuir o
+          // espaço inteiro a cada uma.
+          $('#quota_referencia').text(
+            d.space_gb > 0
+              ? 'Espaço contratado no contrato: ' + d.space_gb.toFixed(2).replace('.', ',') + ' Gb (referência — a cota da conta pode ser menor).'
+              : 'Este contrato não tem espaço contratado definido.'
+          );
+          $('#quota_gb').val(d.disk_limit_gb);
+          $('#quota_ilimitado').prop('checked', d.disk_limit_mb === null);
+          $('#quota_gb').prop('disabled', d.disk_limit_mb === null);
+          $('#btn_salvar_quota').prop('disabled', false);
+        },
+        error: function(xhr) {
+          console.log(xhr.responseText);
+          if (seq !== quotaSeq) return;
+          $('#modal_quota_conta').modal('hide');
+          notificar('error', 'Erro ao carregar os dados da conta.');
+        }
+      });
+    });
+
+    $(document).on('change', '#quota_ilimitado', function() {
+      $('#quota_gb').prop('disabled', $(this).is(':checked'));
+    });
+
+    $(document).on('click', '#btn_salvar_quota', function() {
+      var $btn = $(this);
+      var ilimitado = $('#quota_ilimitado').is(':checked');
+      var gb = $('#quota_gb').val();
+      var conta = $('#quota_conta_info').text();
+
+      Swal.fire({
+        title: 'Alterar a cota?',
+        // Nomeia a CONTA, não o domínio: no WHM e no DirectAdmin a cota vale
+        // para o usuário inteiro, e a mudança atinge todos os domínios dele.
+        html: 'A capacidade da conta passará a ser <strong>' + (ilimitado ? 'ilimitada' : esc(gb) + ' Gb') + '</strong>.' +
+          '<br><br><small class="text-muted">' + esc(conta) + '</small>' +
+          '<br><small>A alteração vale para a conta inteira no painel e passa a valer imediatamente.</small>',
+        icon: 'warning',
+        showCancelButton: true,
+        cancelButtonColor: '#ccc',
+        cancelButtonText: 'Cancelar',
+        confirmButtonText: 'Alterar'
+      }).then(function(result) {
+        if (!result.value) return;
+
+        $btn.prop('disabled', true).html('<span class="spinner-border spinner-border-sm me-1"></span> APLICANDO...');
+
+        $.ajax({
+          type: 'POST',
+          url: '<?php echo base_url('contratos/json_postsalvarquota'); ?>',
+          data: {
+            id: quotaIdDominio,
+            quota_gb: gb,
+            unlimited: ilimitado ? 'S' : 'N'
+          },
+          dataType: 'json',
+          success: function(data) {
+            if (sessaoExpirou(data)) return;
+            if (!data || !data.return) {
+              notificar('error', (data && data.message) ? data.message : 'Erro ao alterar a cota.');
+              $btn.prop('disabled', false).html('<i class="mdi mdi-content-save"></i> SALVAR');
+              return;
+            }
+            // Recarrega para a coluna de uso e o retrato da conta virem do banco
+            // já atualizado, em vez de a tela afirmar um número que só existe no
+            // navegador.
+            window.location.reload();
+          },
+          error: function(xhr) {
+            console.log(xhr.responseText);
+            notificar('error', 'Erro ao alterar a cota.');
+            $btn.prop('disabled', false).html('<i class="mdi mdi-content-save"></i> SALVAR');
           }
         });
       });

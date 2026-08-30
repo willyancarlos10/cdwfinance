@@ -229,6 +229,208 @@ class Server_directadmin
     }
 
     /**
+     * Campos do CMD_API_SHOW_USER_CONFIG que NÃO voltam no modify.
+     *
+     * São identidade e estado (quem criou, quando, se está suspenso), não
+     * configuração editável. `suspended` fica de fora porque a suspensão tem
+     * comando próprio (`CMD_API_SELECT_USERS`) — reenviá-lo aqui misturaria
+     * duas operações que o projeto mantém separadas.
+     */
+    const CAMPOS_NAO_REENVIADOS = [
+        'name', 'username', 'usertype', 'creator', 'date_created', 'suspended',
+        'suspend_time', 'password', 'clear_password', 'api_with_password',
+    ];
+
+    /**
+     * Pares numérico => checkbox "ilimitado" do formulário do DirectAdmin.
+     *
+     * No DA, ilimitado não é um valor do campo numérico: é o checkbox irmão.
+     * O SHOW_USER_CONFIG devolve a string `unlimited` no campo numérico, e
+     * mandá-la de volta crua faz o modify gravar zero — que é o oposto.
+     */
+    const CAMPOS_ILIMITADOS = [
+        'bandwidth' => 'ubandwidth',
+        'quota' => 'uquota',
+        'vdomains' => 'uvdomains',
+        'nsubdomains' => 'unsubdomains',
+        'nemails' => 'unemails',
+        'nemailf' => 'unemailf',
+        'nemailml' => 'unemailml',
+        'nemailr' => 'unemailr',
+        'mysql' => 'umysql',
+        'domainptr' => 'udomainptr',
+        'ftp' => 'uftp',
+        'inode' => 'uinode',
+    ];
+
+    /**
+     * Altera a COTA DE DISCO de um usuário do DirectAdmin.
+     *
+     * A unidade é a conta, como no WHM e como na suspensão daqui.
+     *
+     * **O CMD_API_MODIFY_USER zera o que for omitido.** Ele processa o
+     * formulário CMD_MODIFY_USER inteiro, e campo ausente vira zero (nos
+     * numéricos) ou OFF (nos checkboxes) — um POST só com `quota` desligaria
+     * PHP, CGI, SSL e zeraria banda e caixas do cliente de uma vez. Por isso a
+     * cota nunca é enviada sozinha: relê o cadastro, reenvia tudo e troca só o
+     * que precisa mudar. É a mesma defesa que o GestorCMS v3 usa ao trocar
+     * senha de caixa, onde omitir a quota zerava a capacidade.
+     *
+     * **Se a releitura falhar, aborta.** Enviar o modify com o formulário
+     * incompleto é pior que não alterar a cota.
+     *
+     * A cota chega em MB, com **zero significando ilimitado** (convenção do
+     * WHM, adotada pelo Server_model para os dois painéis); aqui isso vira
+     * `uquota=ON`, que é como o DirectAdmin representa o mesmo estado.
+     *
+     * @param  array  $config
+     * @param  string $usuario
+     * @param  int    $quotaMb 0 = ilimitado
+     * @return array  success, message
+     */
+    public function setQuota($config, $usuario, $quotaMb)
+    {
+        $conta = trim((string) $usuario);
+        if ($conta === '') {
+            return ['success' => FALSE, 'message' => 'Usuário do DirectAdmin não informado.'];
+        }
+
+        $cota = (int) $quotaMb;
+        if ($cota < 0) {
+            return ['success' => FALSE, 'message' => 'Cota inválida.'];
+        }
+
+        $falha = 'Falha ao alterar a cota do usuário no DirectAdmin';
+
+        $atual = $this->configCruDoUsuario($config, $conta);
+        if ($atual === FALSE) {
+            return [
+                'success' => FALSE,
+                'message' => $falha . ': não foi possível ler o cadastro atual do usuário, e alterar sem ele'
+                    . ' apagaria os demais limites da conta.',
+            ];
+        }
+
+        $post = $this->montarModifyUser($atual, $conta, $cota);
+
+        $resposta = $this->request($config, '/CMD_API_MODIFY_USER', $post);
+        if (empty($resposta['success'])) {
+            return ['success' => FALSE, 'message' => $resposta['message']];
+        }
+
+        if (stripos($resposta['raw'], '<html') !== FALSE) {
+            return ['success' => FALSE, 'message' => $falha . ': a conta informada não tem permissão de API.'];
+        }
+
+        $dados = $this->parse($resposta['raw']);
+
+        // Só `error=0` é sucesso — mesmo critério da suspensão. O DirectAdmin
+        // responde HTTP 200 para erro de negócio, então formato não
+        // reconhecido é falha, nunca "deu certo".
+        if (!is_array($dados) || !isset($dados['error'])) {
+            $bruto = trim((string) $resposta['raw']);
+            return [
+                'success' => FALSE,
+                'message' => $falha . ': resposta em formato não reconhecido'
+                    . ($bruto !== '' ? ' (' . mb_substr($bruto, 0, 120) . ')' : '') . '.',
+            ];
+        }
+
+        if ((string) $dados['error'] !== '0') {
+            $texto = isset($dados['text']) ? trim(strip_tags((string) $dados['text'])) : '';
+            $detalhe = isset($dados['details']) ? trim(strip_tags((string) $dados['details'])) : '';
+            $mensagem = trim($texto . ($detalhe !== '' ? ' — ' . $detalhe : ''));
+
+            return ['success' => FALSE, 'message' => $falha . ($mensagem !== '' ? ': ' . $mensagem : '.')];
+        }
+
+        // Confirmação positiva: relê e compara. O `error=0` diz que o formulário
+        // foi aceito, não que a cota é a pedida — e como este é o painel em que
+        // um campo omitido some em silêncio, confirmar é o que separa "gravou" de
+        // "respondeu bonito". Falha na releitura não derruba o sucesso: a
+        // alteração foi aceita, e a sincronização confere depois.
+        $depois = $this->configCruDoUsuario($config, $conta);
+        if (is_array($depois) && isset($depois['quota'])) {
+            $gravada = mb_strtolower(trim((string) $depois['quota'])) === 'unlimited' ? 0 : (int) $depois['quota'];
+            if ($gravada !== $cota) {
+                return [
+                    'success' => FALSE,
+                    'message' => $falha . ': o painel aceitou a alteração mas manteve a cota em '
+                        . ($gravada === 0 ? 'ilimitada' : $gravada . ' MB') . '.',
+                ];
+            }
+        }
+
+        return ['success' => TRUE, 'message' => isset($dados['text']) ? trim((string) $dados['text']) : ''];
+    }
+
+    /**
+     * Config cru do usuário, sem o recorte de `configDoUsuario()`.
+     *
+     * A sincronização só quer cinco campos; o modify precisa do formulário
+     * inteiro de volta, inclusive as chaves que este código não interpreta.
+     *
+     * @param  array  $config
+     * @param  string $usuario
+     * @return array|bool pares chave => valor, ou FALSE
+     */
+    private function configCruDoUsuario($config, $usuario)
+    {
+        $resposta = $this->request($config, '/CMD_API_SHOW_USER_CONFIG?user=' . rawurlencode($usuario));
+        if (empty($resposta['success'])) return FALSE;
+
+        $dados = $this->parse($resposta['raw']);
+        if (!is_array($dados) || !isset($dados['domain'])) return FALSE;
+
+        return $dados;
+    }
+
+    /**
+     * Monta o corpo do CMD_API_MODIFY_USER preservando o cadastro atual.
+     *
+     * @param  array  $atual   config cru vindo do SHOW_USER_CONFIG
+     * @param  string $usuario
+     * @param  int    $cotaMb  0 = ilimitado
+     * @return array
+     */
+    private function montarModifyUser(array $atual, $usuario, $cotaMb)
+    {
+        $post = [
+            'action' => 'single',
+            'user' => $usuario,
+        ];
+
+        foreach ($atual as $chave => $valor) {
+            if (is_array($valor)) continue;
+            if (in_array($chave, self::CAMPOS_NAO_REENVIADOS, TRUE)) continue;
+
+            $post[$chave] = (string) $valor;
+        }
+
+        // `unlimited` no campo numérico vira o checkbox irmão ligado. Sem isso o
+        // modify grava zero e o cliente perde de uma vez o que era ilimitado.
+        foreach (self::CAMPOS_ILIMITADOS as $campo => $checkbox) {
+            if (!isset($post[$campo])) continue;
+
+            if (mb_strtolower(trim($post[$campo])) === 'unlimited') {
+                $post[$campo] = '0';
+                $post[$checkbox] = 'ON';
+            }
+        }
+
+        // A cota pedida vence o que veio da releitura.
+        unset($post['uquota']);
+        if ($cotaMb === 0) {
+            $post['quota'] = '0';
+            $post['uquota'] = 'ON';
+        } else {
+            $post['quota'] = (string) $cotaMb;
+        }
+
+        return $post;
+    }
+
+    /**
      * Suspende ou reativa um USUÁRIO do DirectAdmin.
      *
      * Como no WHM, a unidade é a conta inteira (todos os domínios do usuário

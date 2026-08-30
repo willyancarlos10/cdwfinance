@@ -972,9 +972,22 @@ class Site_monitor_model extends CI_Model
    * de um contrato, de clientes diferentes. Mesmo padrão do
    * `Servidores::clientesPorDominio()`, que existe para não fazer N+1.
    *
+   * Devolve o ID junto do nome porque a coluna Cliente das duas telas de
+   * monitoramento LINKA para `clientes/info` — e resolver o id na view exigiria
+   * uma consulta por linha, que é justamente o N+1 que este método evita.
+   *
+   * O `label` sai pronto daqui, e não das views, por causa do desempate: a lista
+   * era deduplicada por NOME, o que colapsava dois cadastros distintos de mesma
+   * razão social num item só. `eclipsemotel.com` é o caso real — filiais
+   * `…0001-21` (Cascavel) e `…0002-02` (Toledo) da mesma empresa —, e a tela
+   * mostrava um cliente onde há dois, com link para apenas um deles. Deduplicar
+   * por ID corrige isso, mas faria a célula repetir a mesma razão social; o nome
+   * fantasia entra SÓ quando há colisão, para não encher de parêntese os 99% de
+   * domínio com um cliente só.
+   *
    * @param  int   $idCompany
    * @param  array $dominios
-   * @return array ['dominio' => 'Cliente A, Cliente B']
+   * @return array ['dominio' => [['id' => int, 'label' => string], ...]]
    */
   public function clientesPorDominio($idCompany, array $dominios)
   {
@@ -989,7 +1002,9 @@ class Site_monitor_model extends CI_Model
       // sem — a comparação despreza o prefixo dos dois lados.
       $sql = 'SELECT DISTINCT
                 LOWER(TRIM(LEADING "www." FROM LOWER(`cd`.`domain`))) AS `chave`,
-                `cu`.`name` AS `cliente`
+                `cu`.`id` AS `id_cliente`,
+                `cu`.`name` AS `cliente`,
+                `cu`.`byname` AS `fantasia`
                 FROM `crm_contracts_domains` `cd`
                 JOIN `crm_contracts` `c` ON `c`.`id` = `cd`.`id_contract`
                 JOIN `crm_customers` `cu` ON `cu`.`id` = `c`.`id_customer`
@@ -999,16 +1014,45 @@ class Site_monitor_model extends CI_Model
       $linhas = $this->db->query($sql, array_merge([(int) $idCompany], $bloco))->result();
 
       foreach ($linhas as $linha) {
-        if (!isset($porDominio[$linha->chave])) $porDominio[$linha->chave] = [];
-        $porDominio[$linha->chave][] = (string) $linha->cliente;
+        $id = (int) $linha->id_cliente;
+        // Chaveado pelo id: o mesmo cliente aparece uma vez por contrato quando
+        // tem o domínio em mais de um, e o DISTINCT do SQL não resolve isso
+        // (as linhas diferem no contrato, que nem sai na seleção).
+        $porDominio[$linha->chave][$id] = [
+          'id' => $id,
+          'name' => (string) $linha->cliente,
+          'byname' => (string) $linha->fantasia,
+        ];
       }
     }
 
-    foreach ($porDominio as $chave => $nomes) {
-      $porDominio[$chave] = implode(', ', array_unique($nomes));
+    foreach ($porDominio as $chave => $clientes) {
+      $porDominio[$chave] = $this->rotularClientes($clientes);
     }
 
     return $porDominio;
+  }
+
+  /**
+   * Monta o `label` de cada cliente da célula, desempatando razão social igual.
+   *
+   * @param  array $clientes indexado por id
+   * @return array lista com ['id', 'label']
+   */
+  private function rotularClientes(array $clientes)
+  {
+    $vezes = array_count_values(array_column($clientes, 'name'));
+
+    $lista = [];
+    foreach ($clientes as $cliente) {
+      $label = $cliente['name'];
+      if ($vezes[$cliente['name']] > 1 && $cliente['byname'] !== '') {
+        $label .= ' (' . $cliente['byname'] . ')';
+      }
+      $lista[] = ['id' => $cliente['id'], 'label' => $label];
+    }
+
+    return $lista;
   }
 
   private function agruparPorSeveridade(array $eventos)

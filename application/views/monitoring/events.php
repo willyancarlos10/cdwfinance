@@ -163,7 +163,7 @@ $cartoes = [
             <?php foreach ($results as $evento) {
               $rotulo = isset($tipos[$evento->type]['rotulo']) ? $tipos[$evento->type]['rotulo'] : $evento->type;
               $badge = isset($badgeSeveridade[$evento->severity]) ? $badgeSeveridade[$evento->severity] : 'bg-secondary';
-              $cliente = isset($customers_by_domain[$evento->domain]) ? $customers_by_domain[$evento->domain] : '';
+              $clientes = isset($customers_by_domain[$evento->domain]) ? $customers_by_domain[$evento->domain] : [];
               $noResumo = in_array($evento->type, $tipos_no_resumo, TRUE);
               ?>
               <tr class="js-linha-evento" data-id="<?php echo (int) $evento->id; ?>">
@@ -187,7 +187,19 @@ $cartoes = [
                     <br /><small class="text-muted"><i class="fa fa-bell-slash"></i> silenciado</small>
                   <?php } ?>
                 </td>
-                <td><?php echo htmlspecialchars($cliente, ENT_QUOTES, 'UTF-8'); ?></td>
+                <td>
+                  <?php // O domínio pode estar em contrato de mais de um cliente: cada nome é seu próprio link.
+                  if (empty($clientes)) { ?>
+                    <small class="text-muted">—</small>
+                  <?php } else {
+                    $links = [];
+                    foreach ($clientes as $c) {
+                      $links[] = '<a href="' . base_url('clientes/info?id=' . (int) $c['id']) . '" title="Abrir a visão geral do cliente">'
+                        . htmlspecialchars($c['label'], ENT_QUOTES, 'UTF-8') . '</a>';
+                    }
+                    echo implode(', ', $links);
+                  } ?>
+                </td>
                 <td>
                   <span class="badge <?php echo $badge; ?>"><?php echo htmlspecialchars($rotulo, ENT_QUOTES, 'UTF-8'); ?></span>
                   <?php if (!$noResumo) { ?>

@@ -144,24 +144,75 @@ class Server_whm
             return ['success' => FALSE, 'message' => $resposta['message']];
         }
 
-        return $this->resultadoAcao($resposta['data'], $suspender);
+        $falha = $suspender ? 'Falha ao suspender a conta no WHM' : 'Falha ao reativar a conta no WHM';
+
+        return $this->resultadoAcao($resposta['data'], $falha);
     }
 
     /**
-     * Lê o resultado de uma ação (suspendacct/unsuspendacct) da resposta do WHM.
+     * Altera a COTA DE DISCO de uma conta do WHM.
+     *
+     * A unidade é a conta (`user`), como na suspensão: a cota do cPanel vale
+     * para o domínio principal e todos os addons/subdomínios daquele usuário.
+     * Quem decide se isso é aceitável é o chamador.
+     *
+     * `QUOTA` é em MEGABYTES e **zero significa ilimitado** — é assim que o WHM
+     * trata o campo "Disk Space Quota (MB)" da tela Modify an Account. Não
+     * confundir com o `disk_limit_mb` gravado aqui, onde ilimitado é NULL: a
+     * conversão entre as duas convenções é do Server_model.
+     *
+     * Só `QUOTA` viaja no `modifyacct`: a API altera apenas o que recebe, então
+     * não é preciso reenviar o resto do cadastro (ao contrário do DirectAdmin,
+     * que zera o que for omitido).
+     *
+     * @param  array  $config
+     * @param  string $usuario conta do cPanel (owner_username)
+     * @param  int    $quotaMb 0 = ilimitado
+     * @return array  success, message
+     */
+    public function setQuota($config, $usuario, $quotaMb)
+    {
+        $conta = trim((string) $usuario);
+        if ($conta === '') {
+            return ['success' => FALSE, 'message' => 'Conta do WHM não informada.'];
+        }
+
+        $cota = (int) $quotaMb;
+        if ($cota < 0) {
+            return ['success' => FALSE, 'message' => 'Cota inválida.'];
+        }
+
+        $endpoint = '/json-api/modifyacct?api.version=1&user=' . rawurlencode($conta)
+            . '&QUOTA=' . $cota;
+
+        $resposta = $this->request($config, $endpoint);
+        if (empty($resposta['success'])) {
+            return ['success' => FALSE, 'message' => $resposta['message']];
+        }
+
+        return $this->resultadoAcao($resposta['data'], 'Falha ao alterar a cota da conta no WHM');
+    }
+
+    /**
+     * Lê o resultado de uma ação (suspendacct/unsuspendacct/modifyacct) da
+     * resposta do WHM.
      *
      * Formato desconhecido NÃO é tratado como sucesso: a API devolve HTTP 200
      * mesmo quando a operação falha (a falha vem no corpo), então assumir "deu
      * certo" por não reconhecer o envelope esconderia justamente o caso que
-     * interessa — a conta continuar no ar depois de o contrato ser encerrado.
+     * interessa — a conta continuar no ar depois de o contrato ser encerrado,
+     * ou seguir sem limite depois de a cota ter sido "alterada".
      *
-     * @param  array $dados
-     * @param  bool  $suspender
-     * @return array success, message
+     * O rótulo da falha vem de fora porque o mesmo envelope serve às três
+     * operações; montá-lo aqui a partir de um booleano só funcionava enquanto
+     * as ações eram duas.
+     *
+     * @param  array  $dados
+     * @param  string $falha rótulo do erro ("Falha ao ... no WHM")
+     * @return array  success, message
      */
-    private function resultadoAcao($dados, $suspender)
+    private function resultadoAcao($dados, $falha)
     {
-        $falha = $suspender ? 'Falha ao suspender a conta no WHM' : 'Falha ao reativar a conta no WHM';
 
         // api.version=1: { metadata: { result: 1, reason: "OK" } }
         if (isset($dados['metadata']) && is_array($dados['metadata']) && isset($dados['metadata']['result'])) {

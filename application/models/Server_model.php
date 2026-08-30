@@ -711,6 +711,192 @@ class Server_model extends CI_Model
     }
 
     /**
+     * Painéis em que a conta de hospedagem tem cota de disco.
+     *
+     * O CloudPanel não tem o conceito (a varredura mede uso com `du -sm`, e a
+     * library nem devolve `disk_limit_mb`), e no Carbonio a cota é da CAIXA
+     * (`zimbraMailQuota`), enquanto aqui a unidade é o domínio — não há a que
+     * aplicar um número vindo do contrato.
+     */
+    const TIPOS_COM_COTA = ['whm', 'directadmin'];
+
+    /**
+     * Diz se o painel aceita alteração de cota, e por que não quando não aceita.
+     *
+     * Serve à tela (que abre o modal e explica) e ao endpoint (que recusa), para
+     * os dois darem a MESMA resposta — motivo escrito só no front vira promessa
+     * que o servidor não cumpre, e vice-versa.
+     *
+     * @param  string $type
+     * @return array  compativel, motivo
+     */
+    public function quotaSuportada($type)
+    {
+        $tipo = mb_strtolower(trim((string) $type));
+
+        if (in_array($tipo, self::TIPOS_COM_COTA, TRUE)) {
+            return ['compativel' => TRUE, 'motivo' => ''];
+        }
+
+        switch ($tipo) {
+            case 'cloudpanel':
+                $motivo = 'O CloudPanel não expõe cota de disco por site — ele informa apenas o espaço em uso.'
+                    . ' Para limitar a capacidade é preciso usar a cota do sistema operacional, direto no servidor.';
+                break;
+            case 'carbonio':
+                $motivo = 'No Carbonio a capacidade é definida por CAIXA de e-mail, não pela conta do domínio.'
+                    . ' O ajuste é feito na gestão de caixas, no GestorCMS.';
+                break;
+            default:
+                $motivo = 'Este tipo de servidor não permite alterar a cota pelo CDW Finance.';
+        }
+
+        return ['compativel' => FALSE, 'motivo' => $motivo];
+    }
+
+    /**
+     * Altera a cota de disco da conta de UM domínio de contrato.
+     *
+     * Uma conta por chamada — sem laço, sem orçamento de tempo e sem lote, ao
+     * contrário da suspensão. A cota é ato pontual sobre uma conta escolhida na
+     * tela, e um "aplicar em todas" seria justamente o botão que a análise
+     * descartou: 73 dos contratos vigentes já usam mais espaço do que
+     * contrataram, e uma passada em massa estrangularia todos eles de uma vez.
+     *
+     * A conversão de convenções acontece aqui: **0 = ilimitado** para as
+     * libraries (é o que WHM e DirectAdmin entendem), mas **NULL = ilimitado**
+     * na coluna `disk_limit_mb` (é o que a 002 documenta e o que a tela lê).
+     * Guardar 0 no banco faria a barra de uso dividir por zero e a API devolver
+     * 0% para quem não tem limite nenhum.
+     *
+     * O estado local só é gravado depois que o painel confirma — mesma regra da
+     * suspensão. Escrever antes deixaria a tela afirmando uma cota que o
+     * servidor recusou.
+     *
+     * @param  int      $idContractDomain linha de crm_contracts_domains
+     * @param  int      $idCompany        escopo do tenant
+     * @param  int|null $quotaMb          NULL = ilimitado
+     * @param  int      $idUser
+     * @return array    success, message, data
+     */
+    public function setAccountQuota($idContractDomain, $idCompany, $quotaMb, $idUser)
+    {
+        $conta = $this->getContractAccount($idContractDomain, $idCompany);
+        if ($conta === NULL) {
+            return ['success' => FALSE, 'message' => 'Domínio não encontrado.', 'data' => NULL];
+        }
+
+        if (empty($conta->id_server_domain)) {
+            return [
+                'success' => FALSE,
+                'message' => 'Este domínio não está vinculado a nenhuma conta de servidor.',
+                'data' => NULL,
+            ];
+        }
+
+        $suporte = $this->quotaSuportada($conta->server_type);
+        if (empty($suporte['compativel'])) {
+            return ['success' => FALSE, 'message' => $suporte['motivo'], 'data' => NULL];
+        }
+
+        $usuario = trim((string) $conta->owner_username);
+        if ($usuario === '') {
+            return [
+                'success' => FALSE,
+                'message' => 'A sincronização não trouxe o usuário dono da conta — altere a cota pelo painel.',
+                'data' => NULL,
+            ];
+        }
+
+        $cotaMb = ($quotaMb === NULL) ? 0 : (int) $quotaMb;
+        if ($cotaMb < 0) {
+            return ['success' => FALSE, 'message' => 'Cota inválida.', 'data' => NULL];
+        }
+
+        $servidor = $this->getServer((int) $conta->id_server, $idCompany);
+        if ($servidor === NULL) {
+            return ['success' => FALSE, 'message' => 'Servidor não encontrado neste tenant.', 'data' => NULL];
+        }
+
+        $config = $this->getConnectionConfig($servidor);
+        if ($config === FALSE) {
+            return [
+                'success' => FALSE,
+                'message' => 'Não foi possível decifrar a credencial do servidor — recadastre a senha/token.',
+                'data' => NULL,
+            ];
+        }
+
+        $cliente = $this->getClient(mb_strtolower((string) $conta->server_type));
+        if ($cliente === FALSE) {
+            return ['success' => FALSE, 'message' => 'Tipo de servidor não suportado.', 'data' => NULL];
+        }
+
+        $suspendeu = sessao_suspender();
+        try {
+            $retorno = $cliente->setQuota($config, $usuario, $cotaMb);
+        } catch (Throwable $e) {
+            $retorno = ['success' => FALSE, 'message' => 'Erro inesperado ao falar com o painel: ' . $e->getMessage()];
+        }
+        sessao_retomar($suspendeu);
+
+        if (empty($retorno['success'])) {
+            log_message('error', '[QUOTA] Falha ao alterar cota — tenant ' . (int) $idCompany
+                . ', contrato ' . (int) $conta->id_contract . ', servidor ' . $conta->server_name
+                . ' (' . $conta->server_type . '), conta ' . $usuario . ', cota ' . $cotaMb . ' MB: '
+                . $retorno['message']);
+
+            return ['success' => FALSE, 'message' => (string) $retorno['message'], 'data' => NULL];
+        }
+
+        $limite = ($cotaMb === 0) ? NULL : $cotaMb;
+
+        $this->db->query(
+            'UPDATE `crm_servers_domains`
+                SET `disk_limit_mb` = ?, `modified` = ?, `modified_by` = ?
+              WHERE `id` = ?',
+            [$limite, date('Y-m-d H:i:s'), (int) $idUser, (int) $conta->id_server_domain]
+        );
+
+        return [
+            'success' => TRUE,
+            'message' => ($limite === NULL)
+                ? 'Cota da conta ' . $usuario . ' alterada para ILIMITADA.'
+                : 'Cota da conta ' . $usuario . ' alterada para ' . number_format($limite / 1024, 2, ',', '.') . ' Gb.',
+            'data' => ['disk_limit_mb' => $limite],
+        ];
+    }
+
+    /**
+     * Domínio de contrato + a conta de servidor a que ele está vinculado.
+     *
+     * Serve ao modal (leitura) e à gravação, com o MESMO escopo por tenant nas
+     * duas — o id vem do POST e sozinho atravessaria empresas.
+     *
+     * @param  int $idContractDomain
+     * @param  int $idCompany
+     * @return object|null
+     */
+    public function getContractAccount($idContractDomain, $idCompany)
+    {
+        $linha = $this->db->query(
+            'SELECT cd.id, cd.id_contract, cd.domain, cd.id_server_domain,
+                    sd.domain AS server_domain, sd.owner_username, sd.id_server,
+                    sd.disk_used_mb, sd.disk_limit_mb, sd.last_sync, sd.plan,
+                    s.name AS server_name, s.type AS server_type,
+                    c.status AS contract_status, c.space_gb
+               FROM crm_contracts_domains cd
+          LEFT JOIN crm_servers_domains sd ON sd.id = cd.id_server_domain
+          LEFT JOIN crm_servers s ON s.id = sd.id_server
+               JOIN crm_contracts c ON c.id = cd.id_contract
+              WHERE cd.id = ? AND cd.id_company = ?',
+            [(int) $idContractDomain, (int) $idCompany]
+        )->row();
+
+        return empty($linha) ? NULL : $linha;
+    }
+
+    /**
      * Servidores ativos elegíveis à sincronização — usado pelo cron.
      *
      * @return array

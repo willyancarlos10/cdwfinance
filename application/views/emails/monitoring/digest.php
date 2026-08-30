@@ -74,7 +74,11 @@ $esc = function ($valor) {
       <table align="center" class="res-full" border="0" cellpadding="0" cellspacing="0" width="100%">
         <?php foreach ($mostrados as $evento) {
           $chave = $evento['domain'];
-          $cliente = isset($clientes[$chave]) ? $clientes[$chave] : '';
+          // O `clientesPorDominio()` devolve [['id','label'], ...] porque as telas
+          // linkam para a visão geral do cliente. Aqui só o rótulo interessa: link
+          // para o painel dentro do e-mail exigiria login e não leva a lugar
+          // nenhum para quem lê no celular.
+          $cliente = isset($clientes[$chave]) ? implode(', ', array_column($clientes[$chave], 'label')) : '';
           $rotulo = isset($rotulos[$evento['type']]['rotulo']) ? $rotulos[$evento['type']]['rotulo'] : $evento['type'];
           ?>
           <tr>
