@@ -154,21 +154,27 @@ class Server_whm
      *
      * A unidade é a conta (`user`), como na suspensão: a cota do cPanel vale
      * para o domínio principal e todos os addons/subdomínios daquele usuário.
-     * Quem decide se isso é aceitável é o chamador.
      *
-     * `QUOTA` é em MEGABYTES e **zero significa ilimitado** — é assim que o WHM
+     * A cota é em MEGABYTES e **zero significa ilimitado** — é assim que o WHM
      * trata o campo "Disk Space Quota (MB)" da tela Modify an Account. Não
      * confundir com o `disk_limit_mb` gravado aqui, onde ilimitado é NULL: a
      * conversão entre as duas convenções é do Server_model.
      *
-     * Só `QUOTA` viaja no `modifyacct`: a API altera apenas o que recebe, então
-     * não é preciso reenviar o resto do cadastro (ao contrário do DirectAdmin,
-     * que zera o que for omitido).
+     * **Usa `editquota`, não `modifyacct`, e a diferença é de escopo.** O
+     * `modifyacct` reprocessa o cadastro INTEIRO da conta e revalida todos os
+     * campos — inclusive os que não enviamos. Um servidor real recusou
+     * `QUOTA=16384` com «"0.015625" is not a valid nonnegative integer», um
+     * valor que não saiu daqui (16384 ÷ 1024² = 0,015625): o painel derivou-o
+     * de outro campo da conta ao revalidar tudo. O `editquota` mexe só na
+     * cota e não tem como esbarrar em campo alheio.
+     *
+     * O `modifyacct` fica como PLANO B, para instalação que não exponha o
+     * `editquota` — e só nesse caso, nunca quando o painel recusa o valor.
      *
      * @param  array  $config
      * @param  string $usuario conta do cPanel (owner_username)
      * @param  int    $quotaMb 0 = ilimitado
-     * @return array  success, message
+     * @return array  success, message, enviado
      */
     public function setQuota($config, $usuario, $quotaMb)
     {
@@ -182,21 +188,61 @@ class Server_whm
             return ['success' => FALSE, 'message' => 'Cota inválida.'];
         }
 
-        $endpoint = '/json-api/modifyacct?api.version=1&user=' . rawurlencode($conta)
-            . '&QUOTA=' . $cota;
+        $falha = 'Falha ao alterar a cota da conta no WHM';
 
-        // O endpoint volta no retorno para o Server_model logá-lo na falha. Não
-        // carrega credencial (o token viaja no header), e é o que responde
-        // "o valor recusado saiu daqui ou foi calculado pelo painel?" sem
-        // depender de reproduzir o caso.
-        $enviado = ['endpoint' => $endpoint, 'quota_mb' => $cota];
+        // `editquota` usa `quota` minúsculo; `modifyacct` usa `QUOTA`. Não é
+        // descuido de quem escreveu — são funções diferentes da mesma API.
+        $tentativas = [
+            'editquota' => '/json-api/editquota?api.version=1&user=' . rawurlencode($conta) . '&quota=' . $cota,
+            'modifyacct' => '/json-api/modifyacct?api.version=1&user=' . rawurlencode($conta) . '&QUOTA=' . $cota,
+        ];
 
-        $resposta = $this->request($config, $endpoint);
-        if (empty($resposta['success'])) {
-            return ['success' => FALSE, 'message' => $resposta['message'], 'enviado' => $enviado];
+        $ultimo = ['success' => FALSE, 'message' => $falha . '.'];
+
+        foreach ($tentativas as $funcao => $endpoint) {
+            // O endpoint volta no retorno para o Server_model logá-lo na falha.
+            // Não carrega credencial (o token viaja no header), e é o que
+            // responde "o valor recusado saiu daqui ou foi calculado pelo
+            // painel?" sem depender de reproduzir o caso.
+            $enviado = ['funcao' => $funcao, 'endpoint' => $endpoint, 'quota_mb' => $cota];
+
+            $resposta = $this->request($config, $endpoint);
+
+            $ultimo = empty($resposta['success'])
+                ? ['success' => FALSE, 'message' => $resposta['message']]
+                : $this->resultadoAcao($resposta['data'], $falha);
+            $ultimo['enviado'] = $enviado;
+
+            // Só cai para o plano B quando a função não existe nesta
+            // instalação. Recusa do VALOR é resposta legítima e definitiva —
+            // repeti-la no modifyacct só trocaria a mensagem de erro.
+            if (!empty($ultimo['success']) || !$this->funcaoInexistente($ultimo['message'])) {
+                return $ultimo;
+            }
         }
 
-        return $this->resultadoAcao($resposta['data'], 'Falha ao alterar a cota da conta no WHM') + ['enviado' => $enviado];
+        return $ultimo;
+    }
+
+    /**
+     * A mensagem indica que a função não existe nesta instalação?
+     *
+     * O WHM responde a função desconhecida ora com 404, ora com HTTP 200 e o
+     * motivo no corpo, e o texto varia entre versões — daí o casamento ser por
+     * pedaços estáveis, e não pela frase inteira.
+     *
+     * @param  string $mensagem
+     * @return bool
+     */
+    private function funcaoInexistente($mensagem)
+    {
+        $texto = mb_strtolower((string) $mensagem);
+
+        foreach (['unknown app', 'unknown function', 'not implemented', 'no such function', 'http 404'] as $pedaco) {
+            if (mb_strpos($texto, $pedaco) !== FALSE) return TRUE;
+        }
+
+        return FALSE;
     }
 
     /**
