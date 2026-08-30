@@ -313,13 +313,22 @@ class Server_directadmin
 
         $post = $this->montarModifyUser($atual, $conta, $cota);
 
+        // Só os campos que decidem o resultado — o POST inteiro carrega e-mail e
+        // IP do cliente, que não têm o que fazer no log.
+        $enviado = [
+            'action' => $post['action'],
+            'quota' => isset($post['quota']) ? $post['quota'] : NULL,
+            'uquota' => isset($post['uquota']) ? $post['uquota'] : NULL,
+            'campos' => count($post),
+        ];
+
         $resposta = $this->request($config, '/CMD_API_MODIFY_USER', $post);
         if (empty($resposta['success'])) {
-            return ['success' => FALSE, 'message' => $resposta['message']];
+            return ['success' => FALSE, 'message' => $resposta['message'], 'enviado' => $enviado];
         }
 
         if (stripos($resposta['raw'], '<html') !== FALSE) {
-            return ['success' => FALSE, 'message' => $falha . ': a conta informada não tem permissão de API.'];
+            return ['success' => FALSE, 'message' => $falha . ': a conta informada não tem permissão de API.', 'enviado' => $enviado];
         }
 
         $dados = $this->parse($resposta['raw']);
@@ -333,6 +342,7 @@ class Server_directadmin
                 'success' => FALSE,
                 'message' => $falha . ': resposta em formato não reconhecido'
                     . ($bruto !== '' ? ' (' . mb_substr($bruto, 0, 120) . ')' : '') . '.',
+                'enviado' => $enviado,
             ];
         }
 
@@ -341,7 +351,7 @@ class Server_directadmin
             $detalhe = isset($dados['details']) ? trim(strip_tags((string) $dados['details'])) : '';
             $mensagem = trim($texto . ($detalhe !== '' ? ' — ' . $detalhe : ''));
 
-            return ['success' => FALSE, 'message' => $falha . ($mensagem !== '' ? ': ' . $mensagem : '.')];
+            return ['success' => FALSE, 'message' => $falha . ($mensagem !== '' ? ': ' . $mensagem : '.'), 'enviado' => $enviado];
         }
 
         // Confirmação positiva: relê e compara. O `error=0` diz que o formulário
@@ -357,6 +367,7 @@ class Server_directadmin
                     'success' => FALSE,
                     'message' => $falha . ': o painel aceitou a alteração mas manteve a cota em '
                         . ($gravada === 0 ? 'ilimitada' : $gravada . ' MB') . '.',
+                    'enviado' => $enviado,
                 ];
             }
         }
@@ -396,7 +407,11 @@ class Server_directadmin
     private function montarModifyUser(array $atual, $usuario, $cotaMb)
     {
         $post = [
-            'action' => 'single',
+            // `customize` é o que aplica valores individuais. Com `single` o
+            // DirectAdmin responde `error=0` e NÃO grava — foi assim que a
+            // primeira versão passou no teste e deixou a conta ilimitada; quem
+            // pegou isso foi a releitura de confirmação, logo abaixo.
+            'action' => 'customize',
             'user' => $usuario,
         ];
 

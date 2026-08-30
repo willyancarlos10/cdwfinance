@@ -185,12 +185,18 @@ class Server_whm
         $endpoint = '/json-api/modifyacct?api.version=1&user=' . rawurlencode($conta)
             . '&QUOTA=' . $cota;
 
+        // O endpoint volta no retorno para o Server_model logá-lo na falha. Não
+        // carrega credencial (o token viaja no header), e é o que responde
+        // "o valor recusado saiu daqui ou foi calculado pelo painel?" sem
+        // depender de reproduzir o caso.
+        $enviado = ['endpoint' => $endpoint, 'quota_mb' => $cota];
+
         $resposta = $this->request($config, $endpoint);
         if (empty($resposta['success'])) {
-            return ['success' => FALSE, 'message' => $resposta['message']];
+            return ['success' => FALSE, 'message' => $resposta['message'], 'enviado' => $enviado];
         }
 
-        return $this->resultadoAcao($resposta['data'], 'Falha ao alterar a cota da conta no WHM');
+        return $this->resultadoAcao($resposta['data'], 'Falha ao alterar a cota da conta no WHM') + ['enviado' => $enviado];
     }
 
     /**

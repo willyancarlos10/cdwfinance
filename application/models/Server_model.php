@@ -841,10 +841,17 @@ class Server_model extends CI_Model
         sessao_retomar($suspendeu);
 
         if (empty($retorno['success'])) {
+            // O que a library de fato enviou entra no log: sem isso, uma recusa
+            // do painel por causa do VALOR não distingue "mandamos errado" de
+            // "o painel calculou errado", e a investigação vira adivinhação.
+            $enviado = isset($retorno['enviado']) && is_array($retorno['enviado'])
+                ? ' | enviado: ' . json_encode($retorno['enviado'], JSON_UNESCAPED_SLASHES)
+                : '';
+
             log_message('error', '[QUOTA] Falha ao alterar cota — tenant ' . (int) $idCompany
                 . ', contrato ' . (int) $conta->id_contract . ', servidor ' . $conta->server_name
                 . ' (' . $conta->server_type . '), conta ' . $usuario . ', cota ' . $cotaMb . ' MB: '
-                . $retorno['message']);
+                . $retorno['message'] . $enviado);
 
             return ['success' => FALSE, 'message' => (string) $retorno['message'], 'data' => NULL];
         }
