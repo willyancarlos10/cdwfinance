@@ -12,8 +12,8 @@ defined('BASEPATH') or exit('No direct script access allowed');
  * ------------------------------------------------------------------
  * A regra que governa tudo: medição ruim nunca vira mudança
  * ------------------------------------------------------------------
- * Título vazio, DNS que não respondeu, charset ilegível ou certificado ausente
- * são "não medido", e não "mudou para nada": o valor anterior é preservado e
+ * Título vazio, DNS que não respondeu ou charset ilegível são "não medido", e
+ * não "mudou para nada": o valor anterior é preservado e
  * nenhum evento nasce. É a mesma regra do `Whois_model::registrarHistorico()`
  * ("valor anterior vazio é primeira leitura, não troca"), e é o que separa uma
  * rotina útil de um gerador diário de 400 falsos positivos.
@@ -59,15 +59,6 @@ class Site_monitor_model extends CI_Model
   /** Respiro entre domínios, para não parecer varredura. */
   const PAUSA_ENTRE_DOMINIOS_US = 120000;
 
-  /**
-   * Limiar do aviso de SSL.
-   *
-   * 14 dias, e não 30: Let's Encrypt vale 90 dias e o certbot renova aos ~30
-   * restantes. Com 30, toda a base entraria em "vencendo" a cada ciclo, para
-   * sempre. Chegando a 14, a renovação automática já falhou de verdade.
-   */
-  const LIMIAR_SSL_DIAS = 14;
-
   const PROPORCAO_FALHA_ABORTA = 0.30;
   const MINIMO_AMOSTRA_DISJUNTOR = 20;
   const URL_CANARIO = 'https://www.google.com/';
@@ -109,13 +100,6 @@ class Site_monitor_model extends CI_Model
     return ($valor > 0) ? $valor : Site_monitor::TIMEOUT_PADRAO;
   }
 
-  /** Antecedência do aviso de certificado SSL, em dias. */
-  public function diasAvisoSsl()
-  {
-    $valor = (int) $this->general_settings_model->getGroupValue(self::GRUPO, 'monitoramento_ssl_dias_aviso', '');
-    return ($valor > 0) ? $valor : self::LIMIAR_SSL_DIAS;
-  }
-
   /**
    * Destinatários do resumo, em cascata: parâmetro geral → e-mail do tenant.
    *
@@ -150,7 +134,6 @@ class Site_monitor_model extends CI_Model
       'marcador_detectado' => ['rotulo' => 'Problema na página inicial', 'severity' => 'critico'],
       'redirecionamento_externo' => ['rotulo' => 'Redireciona para outro domínio', 'severity' => 'critico'],
       'ns_alterado' => ['rotulo' => 'Nameservers alterados', 'severity' => 'alerta'],
-      'ssl_vencendo' => ['rotulo' => 'Certificado SSL', 'severity' => 'alerta'],
       'site_restabelecido' => ['rotulo' => 'Site restabelecido', 'severity' => 'info'],
       'titulo_alterado' => ['rotulo' => 'Título da home alterado', 'severity' => 'info'],
     ];
@@ -164,6 +147,7 @@ class Site_monitor_model extends CI_Model
       'index_of' => 'Listagem de diretório (site sem index)',
       'padrao_servidor' => 'Página padrão do servidor (site não publicado)',
       'parking' => 'Página de domínio estacionado / em construção',
+      'erro_pagina' => 'Página exibindo erro de servidor (PHP, banco de dados)',
       'sem_titulo' => 'Página sem título (possivelmente em branco ou com erro)',
     ];
   }
@@ -182,7 +166,7 @@ class Site_monitor_model extends CI_Model
    */
   public function tiposNoResumo()
   {
-    return ['site_fora', 'marcador_detectado', 'redirecionamento_externo', 'ns_alterado', 'ssl_vencendo', 'site_restabelecido'];
+    return ['site_fora', 'marcador_detectado', 'redirecionamento_externo', 'ns_alterado', 'site_restabelecido'];
   }
 
   // ------------------------------------------------------------------
@@ -334,8 +318,7 @@ class Site_monitor_model extends CI_Model
                      `http_status` = NULL, `http_result` = NULL, `http_final_url` = NULL,
                      `http_message` = NULL, `title` = NULL, `flag` = NULL,
                      `down_since` = NULL, `down_notified` = 0, `consecutive_failures` = 0,
-                     `ssl_expiration_date` = NULL, `ssl_issuer` = NULL, `ssl_status` = NULL,
-                     `ssl_notified_for` = NULL, `check_host` = NULL,
+                     `check_host` = NULL,
                      `last_check` = NULL, `last_success` = NULL, `check_status` = NULL,
                      `modified` = ?, `modified_by` = ?
                WHERE `id_company` = ? AND `active` = 0 AND `domain` IN (' . $marcadores . ')';
@@ -723,7 +706,7 @@ class Site_monitor_model extends CI_Model
         $foraDoAr = ['linha' => $linha, 'detalhe' => (string) $http['message']];
       }
 
-      // Nada de título, marcador ou SSL: não foram medidos.
+      // Nada de título nem marcador: não foram medidos.
       return ['eventos' => $eventos, 'fora_do_ar' => $foraDoAr];
     }
 
@@ -750,7 +733,6 @@ class Site_monitor_model extends CI_Model
     $eventos = array_merge($eventos, $this->compararTitulo($linha, $dados, $atualiza, $agora));
     $eventos = array_merge($eventos, $this->compararMarcador($linha, $dados, $atualiza));
     $eventos = array_merge($eventos, $this->compararRedirecionamento($linha, $dados));
-    $eventos = array_merge($eventos, $this->compararSsl($linha, $dados, $atualiza));
 
     return ['eventos' => $eventos, 'fora_do_ar' => $foraDoAr];
   }
@@ -816,12 +798,22 @@ class Site_monitor_model extends CI_Model
     if ($novo === NULL) return [];
 
     $rotulos = $this->rotulosMarcador();
+    $detalhe = isset($rotulos[$novo]) ? $rotulos[$novo] : $novo;
+
+    // O `erro_pagina` traz junto o trecho que o justifica. "A home tem um erro"
+    // e "a home tem Undefined variable: partnerList em views/home.php:231" pedem
+    // ações diferentes — e quem lê o resumo por e-mail não tem o site aberto.
+    // A coluna `detail` é varchar(500) e o texto vem do site: o corte protege a
+    // gravação, e o `limparTexto()` da library já tirou emoji e tags.
+    if (!empty($dados['flag_detail'])) {
+      $detalhe = mb_substr($detalhe . ' — ' . $dados['flag_detail'], 0, 490);
+    }
 
     return [[
       'type' => 'marcador_detectado',
       'old' => $anterior,
       'new' => $novo,
-      'detail' => isset($rotulos[$novo]) ? $rotulos[$novo] : $novo,
+      'detail' => $detalhe,
     ]];
   }
 
@@ -859,58 +851,6 @@ class Site_monitor_model extends CI_Model
       'old' => (string) $linha->apex,
       'new' => $apexFinal,
       'detail' => 'A home passou a redirecionar para ' . mb_substr((string) $dados['http_final_url'], 0, 300) . '.',
-    ]];
-  }
-
-  /**
-   * Certificado vencido, de nome divergente ou perto de vencer.
-   *
-   * `ssl_notified_for` guarda PARA QUAL vencimento o aviso saiu, e não um
-   * booleano: quando o certificado é renovado a data muda e o aviso volta a
-   * ficar disponível, sem nunca repetir o mesmo alerta em rodadas seguidas.
-   */
-  private function compararSsl($linha, array $dados, array &$atualiza)
-  {
-    $status = isset($dados['ssl_status']) ? $dados['ssl_status'] : NULL;
-    $vencimento = isset($dados['ssl_expiration_date']) ? $dados['ssl_expiration_date'] : NULL;
-
-    // Não medido: preserva.
-    if ($status === NULL) return [];
-
-    $atualiza['ssl_status'] = $status;
-    $atualiza['ssl_expiration_date'] = $vencimento;
-    $atualiza['ssl_issuer'] = isset($dados['ssl_issuer']) ? $dados['ssl_issuer'] : NULL;
-
-    // Site em http puro não tem certificado a vencer — e isso não é incidente.
-    if ($status === 'ausente') {
-      $atualiza['ssl_notified_for'] = NULL;
-      return [];
-    }
-
-    $limite = date('Y-m-d', strtotime('+' . $this->diasAvisoSsl() . ' days'));
-    $detalhe = '';
-
-    if ($status === 'vencido') {
-      $detalhe = 'Certificado vencido' . ($vencimento ? ' em ' . date('d/m/Y', strtotime($vencimento)) : '') . '.';
-    } elseif ($status === 'nome_divergente') {
-      $detalhe = 'O certificado não cobre este domínio — o navegador do visitante mostra aviso de segurança.';
-    } elseif ($vencimento !== NULL && $vencimento <= $limite) {
-      $detalhe = 'Certificado vence em ' . date('d/m/Y', strtotime($vencimento)) . '.';
-    } else {
-      $atualiza['ssl_notified_for'] = NULL;
-      return [];
-    }
-
-    $chave = ($vencimento !== NULL) ? $vencimento : date('Y-m-d');
-    if ((string) $linha->ssl_notified_for === $chave) return [];
-
-    $atualiza['ssl_notified_for'] = $chave;
-
-    return [[
-      'type' => 'ssl_vencendo',
-      'old' => empty($linha->ssl_expiration_date) ? NULL : (string) $linha->ssl_expiration_date,
-      'new' => $vencimento,
-      'detail' => $detalhe,
     ]];
   }
 

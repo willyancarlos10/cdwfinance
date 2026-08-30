@@ -21,8 +21,6 @@ $temFiltro = ($fKeyword !== '' || !empty($chips));
 $badgeSituacao = [
   'fora' => 'bg-danger',
   'marcador' => 'bg-danger',
-  'ssl_problema' => 'bg-warning text-dark',
-  'ssl_vencendo' => 'bg-warning text-dark',
   'nunca_respondeu' => 'bg-dark',
   'bloqueado' => 'bg-info',
   'pendente' => 'bg-secondary',
@@ -110,7 +108,6 @@ $badgeSituacao = [
               <th>Situação</th>
               <th>Título da home</th>
               <th>Nameservers</th>
-              <th>SSL</th>
               <th>Checado</th>
             </tr>
           </thead>
@@ -166,19 +163,6 @@ $badgeSituacao = [
                     <br /><small class="text-muted" title="Conjunto novo aguardando confirmação na próxima checagem — durante a propagação o DNS alterna entre o antigo e o novo.">
                       <i class="fa fa-clock"></i> mudança em confirmação
                     </small>
-                  <?php } ?>
-                </td>
-                <td class="text-nowrap">
-                  <?php if (!empty($d->ssl_expiration_date)) { ?>
-                    <small><?php echo date('d/m/Y', strtotime($d->ssl_expiration_date)); ?></small>
-                  <?php } else { ?>
-                    <small class="text-muted">—</small>
-                  <?php } ?>
-                  <?php if (!empty($d->ssl_status) && $d->ssl_status !== 'ok') { ?>
-                    <br /><small class="text-danger"><?php echo htmlspecialchars($d->ssl_status, ENT_QUOTES, 'UTF-8'); ?></small>
-                  <?php } ?>
-                  <?php if (!empty($d->ssl_issuer)) { ?>
-                    <br /><small class="text-muted"><?php echo htmlspecialchars($d->ssl_issuer, ENT_QUOTES, 'UTF-8'); ?></small>
                   <?php } ?>
                 </td>
                 <td class="text-nowrap">
@@ -243,7 +227,7 @@ $badgeSituacao = [
               $btn.prop('disabled', false).find('i').removeClass('fa-spin');
               return;
             }
-            // Recarrega: a checagem mexe em situação, título, NS e SSL de uma
+            // Recarrega: a checagem mexe em situação, título e NS de uma
             // vez, e reescrever tudo in-place duplicaria as regras de cor que
             // já vivem no PHP.
             location.reload();

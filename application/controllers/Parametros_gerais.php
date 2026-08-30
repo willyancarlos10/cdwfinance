@@ -393,12 +393,6 @@ class Parametros_gerais extends MY_Controller
       redirect(base_url('parametros_gerais?tab=tab_monitoramento'));
     }
 
-    $diasSsl = isset($input['monitoramento_ssl_dias_aviso']) ? (int) $input['monitoramento_ssl_dias_aviso'] : 0;
-    if ($diasSsl < 1 || $diasSsl > 90) {
-      $this->session->set_flashdata('warning', 'A antecedência do aviso de SSL deve estar entre 1 e 90 dias.');
-      redirect(base_url('parametros_gerais?tab=tab_monitoramento'));
-    }
-
     // Allowlist de e-mails: o campo aceita lista separada por vírgula, e endereço
     // inválido é DESCARTADO com aviso em vez de ir para a fila — um destinatário
     // quebrado faria todo resumo falhar no cron_enviar_email.
@@ -414,7 +408,6 @@ class Parametros_gerais extends MY_Controller
     $this->general_settings_model->saveGroup('monitoramento', [
       'monitoramento_intervalo_horas' => (string) $intervalo,
       'monitoramento_timeout' => (string) $timeout,
-      'monitoramento_ssl_dias_aviso' => (string) $diasSsl,
       'monitoramento_email_destinatarios' => mb_substr(implode(', ', array_unique($validos)), 0, 500),
     ], (int) $this->session->userdata('user')->id);
 
@@ -552,7 +545,6 @@ class Parametros_gerais extends MY_Controller
     $this->data['monitoramento_defaults'] = [
       'monitoramento_intervalo_horas' => $this->site_monitor_model->intervaloHoras(),
       'monitoramento_timeout' => $this->site_monitor_model->timeoutChecagem(),
-      'monitoramento_ssl_dias_aviso' => $this->site_monitor_model->diasAvisoSsl(),
       'monitoramento_email_destinatarios' => '',
     ];
 

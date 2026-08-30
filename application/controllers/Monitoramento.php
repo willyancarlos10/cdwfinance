@@ -364,8 +364,6 @@ class Monitoramento extends MY_Controller
     return [
       'fora' => 'Fora do ar',
       'marcador' => 'Problema na página inicial',
-      'ssl_problema' => 'Certificado inválido',
-      'ssl_vencendo' => 'Certificado vencendo',
       'nunca_respondeu' => 'Nunca respondeu',
       'bloqueado' => 'Bloqueado por firewall/WAF',
       'pendente' => 'Ainda não checado',

@@ -408,9 +408,9 @@ if ($this->input->post('rdap') !== null) {
                 ?>
                 <div class="tab-pane" id="fat_aviso_nota" role="tabpanel">
                   <p class="text-muted"><small>
-                    Mensagem que leva a nota fiscal ao cliente. Vale <strong>só para contratos que emitem a NF depois da compensação</strong> —
-                    em "Emitir junto com o boleto" a nota vai anexada no próprio e-mail da cobrança, e este texto não é usado.
-                  </small></p>
+                      Mensagem que leva a nota fiscal ao cliente. Vale <strong>só para contratos que emitem a NF depois da compensação</strong> —
+                      em "Emitir junto com o boleto" a nota vai anexada no próprio e-mail da cobrança, e este texto não é usado.
+                    </small></p>
 
                   <div class="row g-3">
                     <div class="col-12">
@@ -444,9 +444,10 @@ if ($this->input->post('rdap') !== null) {
                   </div>
                 </div>
 
-                <?php // ---------- Aviso de reajuste ---------- ?>
+                <?php // ---------- Aviso de reajuste ---------- 
+                ?>
                 <div class="tab-pane" id="fat_aviso_reajuste" role="tabpanel">
-                
+
                   <div class="row g-3">
                     <div class="col-12">
                       <label class="form-label" for="reajuste_email_assunto">* Assunto</label>
@@ -515,35 +516,27 @@ if ($this->input->post('rdap') !== null) {
           <div class="tab-pane <?php if ($tabsDefault === 'tab_monitoramento') echo 'active'; ?>" id="tab_monitoramento" role="tabpanel">
             <form method="POST" action="<?php echo base_url('parametros_gerais/post_monitoramento'); ?>" class="mt-3">
               <div class="alert alert-info p-2" role="alert">
-                A rotina "cron_monitorar_sites" checa, uma vez por dia, os domínios de contrato vigente cujo tipo de serviço esteja marcado como "tem site" em GESTÃO/Tipos de serviços. Ela compara os nameservers e o título da home com a checagem anterior e detecta site fora do ar, página de erro ou suspensão e certificado vencendo.
+                A rotina "cron_monitorar_sites" checa, uma vez por dia, os domínios de contrato vigente cujo tipo de serviço esteja marcado como "tem site" em GESTÃO/Tipos de serviços. Ela compara os nameservers e o título da home com a checagem anterior e detecta site fora do ar, página de erro ou suspensão e redirecionamento para outro domínio. O certificado SSL não é mais conferido.
               </div>
 
               <div class="row g-3">
-                <div class="col-md-4">
+                <div class="col-md-3">
                   <label class="form-label" for="monitoramento_intervalo_horas">* Intervalo mínimo entre checagens (horas)</label>
                   <input type="number" min="1" max="168" class="form-control" id="monitoramento_intervalo_horas" name="monitoramento[monitoramento_intervalo_horas]" value="<?php echo htmlspecialchars($mon('monitoramento_intervalo_horas'), ENT_QUOTES, 'UTF-8'); ?>" required>
                   <small class="form-text text-muted">Com a rotina rodando 1x/dia, 20 horas garante que todo domínio entre em toda execução.</small>
                 </div>
 
-                <div class="col-md-4">
+                <div class="col-md-3">
                   <label class="form-label" for="monitoramento_timeout">* Tempo limite por site (segundos)</label>
                   <input type="number" min="3" max="60" class="form-control" id="monitoramento_timeout" name="monitoramento[monitoramento_timeout]" value="<?php echo htmlspecialchars($mon('monitoramento_timeout'), ENT_QUOTES, 'UTF-8'); ?>" required>
-                  <small class="form-text text-muted">Site que passa disso já é um problema. Valores altos fazem a rodada estourar a janela por causa dos domínios sem resposta.</small>
-                </div>
-
-                <div class="col-md-4">
-                  <label class="form-label" for="monitoramento_ssl_dias_aviso">* Avisar do SSL com quantos dias</label>
-                  <input type="number" min="1" max="90" class="form-control" id="monitoramento_ssl_dias_aviso" name="monitoramento[monitoramento_ssl_dias_aviso]" value="<?php echo htmlspecialchars($mon('monitoramento_ssl_dias_aviso'), ENT_QUOTES, 'UTF-8'); ?>" required>
-                  <small class="form-text text-muted">Não use 30: o Let's Encrypt renova sozinho aos ~30 dias e a base inteira entraria em "vencendo" a cada ciclo.</small>
+                  <small class="form-text text-muted">Site que passa disso já é um problema.</small>
                 </div>
 
                 <div class="col-md-12">
                   <label class="form-label" for="monitoramento_email_destinatarios">Destinatários do resumo diário</label>
                   <input type="text" class="form-control" id="monitoramento_email_destinatarios" maxlength="500" name="monitoramento[monitoramento_email_destinatarios]" value="<?php echo htmlspecialchars($mon('monitoramento_email_destinatarios'), ENT_QUOTES, 'UTF-8'); ?>" placeholder="suporte@empresa.com.br, ti@empresa.com.br">
                   <small class="form-text text-muted">
-                    Separe por vírgula. Em branco, o resumo vai para o e-mail cadastrado na empresa. Rodada sem
-                    nenhuma alteração não envia e-mail, e mudança de título da home não entra no resumo — ela fica
-                    só no painel, porque muda sozinha com promoção e plugin de SEO.
+                    Separe por vírgula. Em branco, o resumo vai para o e-mail cadastrado na empresa.
                   </small>
                 </div>
               </div>
@@ -585,9 +578,10 @@ if ($this->input->post('rdap') !== null) {
             <form method="POST" action="<?php echo base_url('parametros_gerais/post_contratos'); ?>" class="mt-3">
               <?php // O `.alert` do tema é `display: flex`, então cada filho vira um flex
               // item: sem o `.alert-message` em volta, todo <strong> quebra numa coluna
-              // própria e o espaço em volta dele some. É o padrão do AppStack. ?>
-              <div class="alert alert-info p-2" role="alert">
-                <div class="alert-message">
+              // própria e o espaço em volta dele some. É o padrão do AppStack. 
+              ?>
+              <div class="alert alert-info" role="alert">
+                <div class="alert-message p-2">
                   Toda mudança de estado de um contrato — criação, suspensão, reativação, encerramento, reabertura e
                   exclusão — fica registrada na aba <strong>Históricos</strong> do próprio contrato, com data, autor e
                   <strong>origem</strong> (painel, importação ou rotina automática). Este bloco decide quem é avisado
@@ -607,7 +601,8 @@ if ($this->input->post('rdap') !== null) {
 
                 <div class="col-md-12">
                   <?php // O `for` só é emitido quando o select existe: apontar para um id
-                  // ausente deixa o clique no rótulo sem efeito nenhum. ?>
+                  // ausente deixa o clique no rótulo sem efeito nenhum. 
+                  ?>
                   <label class="form-label d-block" <?php echo empty($contratos_usuarios) ? '' : 'for="contratos_aviso_usuarios"'; ?>>Quem recebe o aviso</label>
 
                   <?php if (empty($contratos_usuarios)) { ?>
@@ -621,12 +616,9 @@ if ($this->input->post('rdap') !== null) {
                     <?php // O `$(".select2").select2()` do footer roda no ready e pega este
                     // select pela classe — não há inicialização própria aqui. O `width: 100%`
                     // é necessário: sem ele o select2 mede o elemento já escondido pela aba
-                    // inativa e nasce com alguns pixels de largura. ?>
-                    <select class="form-control select2 select2-multiple" multiple
-                            id="contratos_aviso_usuarios"
-                            name="contratos[contratos_aviso_usuarios][]"
-                            style="width: 100%;"
-                            data-placeholder="Selecione os usuários que receberão o aviso">
+                    // inativa e nasce com alguns pixels de largura. 
+                    ?>
+                    <select class="form-control select2 select2-multiple" multiple id="contratos_aviso_usuarios" name="contratos[contratos_aviso_usuarios][]" style="width: 100%;" data-placeholder="Selecione os usuários que receberão o aviso">
                       <?php foreach ($contratos_usuarios as $u) {
                         // Nome E e-mail no rótulo: é o e-mail que vai receber, e quem escolhe
                         // precisa conferir sem abrir o cadastro do usuário — no dropdown e no
@@ -636,7 +628,7 @@ if ($this->input->post('rdap') !== null) {
                         if (!empty($contratos_multiempresa)) {
                           $rotulo .= ' (' . (string) $u->company_byname . ')';
                         }
-                        ?>
+                      ?>
                         <option value="<?php echo (int) $u->id; ?>" <?php echo in_array((int) $u->id, $contratosUsuarios, TRUE) ? 'selected' : ''; ?>>
                           <?php echo htmlspecialchars($rotulo, ENT_QUOTES, 'UTF-8'); ?>
                         </option>
@@ -644,20 +636,8 @@ if ($this->input->post('rdap') !== null) {
                     </select>
                   <?php } ?>
 
-                  <small class="form-text text-muted d-block mt-2">
-                    A lista traz os usuários <strong>ativos com e-mail cadastrado</strong> — o endereço vem do
-                    cadastro de cada um, então trocar o e-mail no perfil já vale no próximo aviso, e usuário
-                    inativado sai da lista sozinho. Sem ninguém selecionado, o aviso vai para o e-mail da empresa.
-                  </small>
                   <small class="form-text text-muted d-block">
-                    <i class="mdi mdi-account-check-outline"></i>
-                    <strong>Quem executou a ação não recebe o próprio aviso</strong> — ele já viu a confirmação na
-                    tela. No resumo da importação a regra só vale para quem executou <em>todas</em> as mudanças do
-                    e-mail.
-                  </small>
-                  <small class="form-text text-muted d-block">
-                    É um aviso <strong>interno</strong>: o cliente nunca o recebe — quem avisa o cliente sobre
-                    boleto e nota fiscal é o bloco "Notificações ao cliente" da tela do contrato.
+                    <strong>Quem executou a ação não recebe o próprio aviso</strong> — ele já viu a confirmação na tela.
                   </small>
                 </div>
 

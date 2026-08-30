@@ -29,12 +29,17 @@ if ($fVisto !== '' && isset($vistos[$fVisto])) $chips[] = $vistos[$fVisto];
 
 $temFiltro = ($fKeyword !== '' || !empty($chips));
 
-/** Cartões do topo: só as faixas que pedem ação. */
+/**
+ * Cartões do topo: só as faixas que pedem ação.
+ *
+ * Eram quatro — os dois de certificado saíram junto com a checagem de SSL. Com
+ * dois, a coluna passa a ser `col-6` em toda largura: mantendo o `col-lg-3` de
+ * antes, os cartões ficariam espremidos num quarto da linha, com metade da
+ * faixa vazia à direita.
+ */
 $cartoes = [
   'fora' => ['rotulo' => 'Fora do ar', 'cor' => 'danger', 'icone' => 'mdi-lan-disconnect'],
   'marcador' => ['rotulo' => 'Página com problema', 'cor' => 'danger', 'icone' => 'mdi-alert-octagon'],
-  'ssl_problema' => ['rotulo' => 'Certificado inválido', 'cor' => 'warning', 'icone' => 'mdi-lock-alert'],
-  'ssl_vencendo' => ['rotulo' => 'Certificado vencendo', 'cor' => 'warning', 'icone' => 'mdi-lock-clock'],
 ];
 ?>
 <div class="row mb-2 mb-xl-2">
@@ -49,7 +54,7 @@ $cartoes = [
 <div class="row">
   <?php foreach ($cartoes as $faixa => $cartao) {
     $total = isset($resumo_situacao[$faixa]) ? (int) $resumo_situacao[$faixa] : 0; ?>
-    <div class="col-6 col-lg-3 mb-3">
+    <div class="col-6 mb-3">
       <div class="card flex-fill h-100">
         <div class="card-body py-3">
           <div class="d-flex align-items-center">

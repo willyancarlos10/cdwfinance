@@ -23,19 +23,28 @@ defined('BASEPATH') or exit('No direct script access allowed');
  * ------------------------------------------------------------------
  * Decisões de cURL que existem para não gerar alarme falso
  * ------------------------------------------------------------------
- * - A leitura é ABORTADA no `</head>` ou em MAX_BYTES: não faz sentido baixar a
- *   home inteira de centenas de sites só para ler o `<title>`. O abort produz
- *   `CURLE_WRITE_ERROR` (23), que é NOSSO e precisa contar como sucesso — sem
- *   essa exceção, todo site do mundo reportaria falha.
+ * - A leitura é ABORTADA em MAX_BYTES. O abort produz `CURLE_WRITE_ERROR` (23),
+ *   que é NOSSO e precisa contar como sucesso — sem essa exceção, todo site do
+ *   mundo reportaria falha.
+ *
+ *   Até o marcador `erro_pagina` existir, a leitura também parava no `</head>`:
+ *   só o `<title>` interessava, e baixar a home inteira de centenas de sites
+ *   seria desperdício. Erro de PHP mora no CORPO — medido na base, o
+ *   `A PHP Error was encountered` de dois sites aparecia nos bytes 35.132 e
+ *   42.344, com o `</head>` em 6.282 e 9.411 —, então parar no head era o mesmo
+ *   que não procurar. Custo medido da troca: de ~22 KB para ~92 KB por site
+ *   (4,1x) e, no enquadramento desfavorável do A/B, +0,33 s por site — cerca de
+ *   2,5 min numa rodada de 454 domínios, contra orçamento de 1.800 s.
  *
  * - NÃO pedimos `gzip` (nada de CURLOPT_ENCODING). Com o corpo comprimido, um
  *   buffer truncado é um stream incompleto que não infla: o título sairia vazio
  *   e viraria "título alterado" todo santo dia.
  *
- * - `SSL_VERIFYPEER` desligado, certificado avaliado por nós via CERTINFO. Com a
- *   verificação ligada, um site de certificado vencido falha por inteiro e
- *   perderíamos o título justamente onde há problema; assim, certificado ruim
- *   vira INFORMAÇÃO em vez de apagão.
+ * - `SSL_VERIFYPEER` desligado. Certificado NÃO é mais avaliado aqui (ver o
+ *   CLAUDE.md), mas a verificação continua desligada de propósito: com ela
+ *   ligada, um site de certificado vencido falha por INTEIRO, e perderíamos o
+ *   título e o marcador justamente no site que está com problema — o certificado
+ *   ruim viraria um apagão em vez de deixar o resto ser medido.
  *
  * - `PROTOCOLS`/`REDIR_PROTOCOLS` restritos a HTTP/HTTPS: seguimos redirect
  *   apontado por terceiro, a partir do servidor da aplicação. Sem a trava, um
@@ -53,8 +62,15 @@ class Site_monitor
   /** Conexão separada do total: host morto tem de desistir rápido. */
   const CONNECT_TIMEOUT = 5;
 
-  /** Teto de leitura do corpo. O `<title>` mora bem no começo do documento. */
-  const MAX_BYTES = 65536;
+  /**
+   * Teto de leitura do corpo.
+   *
+   * 256 KB, e não os 64 KB de quando só o título importava: o `erro_pagina`
+   * procura no corpo inteiro. Na base real 12% das home passam disso, e nelas um
+   * erro no rodapé escapa — é o preço de não multiplicar por oito o tráfego da
+   * rodada por causa da cauda.
+   */
+  const MAX_BYTES = 262144;
 
   const MAX_REDIRECTS = 5;
 
@@ -75,6 +91,47 @@ class Site_monitor
     'index_of' => '/^index of |^diret[óo]rio de /iu',
     'padrao_servidor' => '/apache2? (ubuntu|debian|centos)? ?default page|welcome to nginx|iis windows server|test page for|cpanel®? default|it works!/iu',
     'parking' => '/dom[íi]nio (registrado|estacionado)|parked (domain|free)|em constru[çc][ãa]o|under construction|future home of/iu',
+  ];
+
+  /** Teto do trecho de erro gravado no evento (a coluna `detail` é varchar 500). */
+  const MAX_TRECHO_ERRO = 300;
+
+  /**
+   * Erro de servidor EXIBIDO na página, procurado no corpo inteiro.
+   *
+   * Diferente das `MARCADORES`, que se ancoram no título: aqui o sintoma é a
+   * página estar servindo, com HTTP 200 e título perfeitamente normal, a saída
+   * de um erro. Foi medido na base — seis sites em 395, com o backtrace do
+   * CodeIgniter expondo inclusive o caminho absoluto no servidor.
+   *
+   * A REGRA que dá precisão a tudo isto: exigir a assinatura COMPLETA, jamais a
+   * palavra isolada. `Warning:` sozinho casaria com página de qualquer assunto;
+   * `Warning: … on line 231` é o formato com que o PHP imprime. Foi a lição do
+   * SSL — pattern que "quase" identifica gera alarme que ninguém mais lê.
+   *
+   * O que NÃO está aqui, e não por esquecimento: erro de JAVASCRIPT. Ele é de
+   * runtime, acontece no navegador, e o cURL não executa script nenhum — um
+   * `Uncaught TypeError` simplesmente não existe no HTML que chega até nós.
+   * Detectá-lo exigiria navegador headless (Chrome/Puppeteer), que é outra
+   * infraestrutura. O que já cobre parte do sintoma é o `sem_titulo`: página que
+   * quebrou a ponto de renderizar vazia cai lá.
+   */
+  const ERROS_SERVIDOR = [
+    // PHP cru. O `on line N` é obrigatório, e é ele que separa erro de texto.
+    'php' => '/(?:Fatal error|Parse error|Warning|Notice|Deprecated|Recoverable fatal error)\s*(?:<\/b>)?\s*:.{0,400}?\bon line\b\s*(?:<b>)?\s*\d+/isu',
+    'php_uncaught' => '/Uncaught\s+(?:Error|Exception|TypeError|ValueError|ArgumentCountError|DivisionByZeroError)\b.{0,200}/isu',
+    'php_stack' => '/Stack trace:\s*(?:<[^>]+>\s*)*#0\s.{0,200}/isu',
+    // CodeIgniter — o caso mais comum desta base.
+    'codeigniter' => '/(?:A PHP Error was encountered|An Error Was Encountered|An uncaught Exception was encountered).{0,300}/isu',
+    'laravel' => '/(?:Whoops, looks like something went wrong|Illuminate\\\\[A-Za-z]+\\\\[A-Za-z\\\\]{0,80}).{0,120}/su',
+    'symfony' => '/Symfony\\\\Component\\\\[A-Za-z]+\\\\[A-Za-z\\\\]{0,80}Exception.{0,120}/su',
+    'wordpress' => '/(?:There has been a critical error on (?:this|your) website|Houve um erro cr[íi]tico (?:neste|no seu) site).{0,120}/isu',
+    'banco' => '/(?:Error establishing a database connection|Erro ao estabelecer (?:uma )?(?:liga[çc][ãa]o|conex[ãa]o).{0,40}(?:base|banco) de dados|You have an error in your SQL syntax|MySQL server has gone away|Access denied for user \'|SQLSTATE\[[A-Z0-9]+\]|Table \'[^\']{1,120}\' doesn\'t exist).{0,200}/isu',
+    'dotnet' => '/(?:Server Error in \'[^\']{0,80}\' Application|System\.(?:Web|Data)\.[A-Za-z]{0,40}Exception).{0,120}/su',
+    // PHP não executado: o servidor está entregando o CÓDIGO-FONTE. É o mais
+    // grave da lista — vaza credencial de banco e chave de API para quem abrir
+    // o site. Ancorado no COMEÇO da resposta, senão casaria com tutorial.
+    'fonte_php' => '/\A\s*<\?php\s.{0,200}/su',
   ];
 
   /**
@@ -144,7 +201,7 @@ class Site_monitor
   }
 
   /**
-   * Abre a home e devolve status, título, marcador e certificado.
+   * Abre a home e devolve status, título e marcador.
    *
    * Tenta uma CASCATA de endereços, porque o host cadastrado nem sempre é o que
    * serve o site: é comum o apex não ter registro A e só o `www.` responder, e
@@ -218,10 +275,9 @@ class Site_monitor
    *
    * Já o HOST tem de voltar sempre à ordem canônica (apex antes de www), porque
    * reaproveitá-lo TRAVA o monitor na variante errada: bastou uma falha
-   * passageira no apex, numa única rodada, para um domínio ficar preso em
-   * `www.` — e como o certificado dele cobria só o apex, a checagem passou a
-   * relatar "certificado não cobre este domínio" indefinidamente, enquanto o
-   * endereço canônico estava perfeito. Um retrato ruim não pode se
+   * passageira no apex, numa única rodada, para um domínio ficar preso no
+   * `www.` e continuar sendo medido ali indefinidamente, enquanto o endereço
+   * canônico respondia perfeitamente. Um retrato ruim não pode se
    * autoperpetuar.
    *
    * @param  string      $host
@@ -271,10 +327,9 @@ class Site_monitor
       CURLOPT_CONNECTTIMEOUT => self::CONNECT_TIMEOUT,
       CURLOPT_TIMEOUT => $timeout,
       // Ver o docblock da classe: desligado de propósito, para o certificado
-      // ruim virar informação em vez de apagar o título.
+      // ruim não apagar a medição do site inteiro.
       CURLOPT_SSL_VERIFYPEER => FALSE,
       CURLOPT_SSL_VERIFYHOST => 0,
-      CURLOPT_CERTINFO => TRUE,
       CURLOPT_USERAGENT => self::USER_AGENT,
       CURLOPT_HTTPHEADER => [
         'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -289,7 +344,7 @@ class Site_monitor
         $buffer .= $pedaco;
         // -1 aborta o download. É o nosso corte, não um erro: o chamador trata
         // CURLE_WRITE_ERROR como sucesso.
-        if (strlen($buffer) >= self::MAX_BYTES || stripos($buffer, '</head>') !== FALSE) return -1;
+        if (strlen($buffer) >= self::MAX_BYTES) return -1;
         return strlen($pedaco);
       },
     ]);
@@ -300,7 +355,6 @@ class Site_monitor
     $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $urlFinal = (string) curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
     $contentType = (string) curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
-    $certificado = curl_getinfo($ch, CURLINFO_CERTINFO);
     $erroTexto = curl_error($ch);
     curl_close($ch);
 
@@ -310,8 +364,15 @@ class Site_monitor
       return $this->falhaTransporte($erro, $erroTexto, $urlFinal);
     }
 
-    $titulo = $this->extrairTitulo($buffer, $contentType);
-    $ssl = $this->interpretarCertificado($certificado, $urlFinal);
+    // A conversão de charset acontece UMA VEZ, aqui, e o documento convertido é
+    // o que title, `<h1>` e varredura de erro enxergam. Antes ela vivia dentro
+    // do extrairTitulo() e o detectarMarcador() recebia o buffer CRU — com o
+    // modificador `u` das expressões, isso significa `preg_match` devolvendo
+    // FALSE em silêncio em toda página latin-1, e a âncora do `<h1>` nunca
+    // disparando ali. O erro de servidor não pode depender do charset do site.
+    $documento = $this->paraUtf8($buffer, $contentType);
+    $titulo = ($documento === NULL) ? NULL : $this->extrairTitulo($documento);
+    $marcador = $this->detectarMarcador($titulo, $documento, $buffer);
 
     $dados = [
       'http_status' => $status,
@@ -319,10 +380,8 @@ class Site_monitor
       'http_final_url' => mb_substr($urlFinal, 0, 500),
       'check_host' => $this->hostDaUrl($urlFinal),
       'title' => $titulo,
-      'flag' => $this->detectarMarcador($titulo, $buffer),
-      'ssl_expiration_date' => $ssl['expiration_date'],
-      'ssl_issuer' => $ssl['issuer'],
-      'ssl_status' => $ssl['status'],
+      'flag' => $marcador['flag'],
+      'flag_detail' => $marcador['detail'],
     ];
 
     $ok = ($status >= 200 && $status < 400);
@@ -378,9 +437,7 @@ class Site_monitor
       'check_host' => NULL,
       'title' => NULL,
       'flag' => NULL,
-      'ssl_expiration_date' => NULL,
-      'ssl_issuer' => NULL,
-      'ssl_status' => NULL,
+      'flag_detail' => NULL,
     ], FALSE);
   }
 
@@ -406,15 +463,12 @@ class Site_monitor
    * Título da home, normalizado e seguro para uma coluna utf8 de 3 bytes.
    *
    * @param  string $html
-   * @param  string $contentType
+   * @param  string $html documento JÁ convertido para UTF-8
    * @return string|null NULL = não foi possível medir (o model preserva o anterior)
    */
-  private function extrairTitulo($html, $contentType)
+  private function extrairTitulo($html)
   {
     if ($html === '') return NULL;
-
-    $html = $this->paraUtf8($html, $contentType);
-    if ($html === NULL) return NULL;
 
     if (!preg_match('/<title[^>]*>(.*?)<\/title>/isu', $html, $captura)) return NULL;
 
@@ -484,143 +538,89 @@ class Site_monitor
   }
 
   /**
-   * Marcador de problema, procurado no título e no primeiro `<h1>`.
+   * Marcador de problema da home, com o trecho que o justifica.
    *
-   * Título ausente também é sinal: página em branco, erro de PHP engolido ou
-   * diretório vazio não têm `<title>`.
+   * Três origens, NESTA ordem, e a ordem é a decisão:
+   *
+   *  1. Os quatro marcadores ancorados no `<title>`/`<h1>`. Vêm primeiro porque
+   *     descrevem um ESTADO conhecido e preciso da página ("conta suspensa",
+   *     "listagem de diretório") — ordem preservada exatamente como era, para a
+   *     chegada do `erro_pagina` não reclassificar nada que já funcionava.
+   *
+   *  2. `erro_pagina`: erro de servidor no CORPO. A varredura roda mesmo com
+   *     título normal — é o caso que motivou o marcador: HTTP 200, título certo,
+   *     e um `A PHP Error was encountered` no meio da página.
+   *
+   *  3. `sem_titulo`, o último. E precisa ser o último: a página que é SÓ um
+   *     fatal error não tem `<title>` nem `<h1>`, então com o antigo retorno
+   *     antecipado ela seria classificada como "sem título" e o erro — que é a
+   *     informação útil — nunca apareceria.
    *
    * @param  string|null $titulo
-   * @param  string      $html
-   * @return string|null
+   * @param  string|null $documento documento em UTF-8; NULL = charset ilegível
+   * @param  string      $bruto     buffer cru, usado só quando não houve conversão
+   * @return array ['flag' => string|null, 'detail' => string|null]
    */
-  private function detectarMarcador($titulo, $html)
+  private function detectarMarcador($titulo, $documento, $bruto)
   {
+    // Sem conversão, o `u` das expressões faria todo preg_match devolver FALSE.
+    // O buffer cru só serve de último recurso, e é o que já valia antes.
+    $html = ($documento === NULL) ? (string) $bruto : $documento;
+
     $alvos = [];
     if ($titulo !== NULL && $titulo !== '') $alvos[] = $titulo;
 
-    if (preg_match('/<h1[^>]*>(.*?)<\/h1>/isu', (string) $html, $captura)) {
+    if (preg_match('/<h1[^>]*>(.*?)<\/h1>/isu', $html, $captura)) {
       $h1 = $this->limparTexto($captura[1]);
       if ($h1 !== NULL) $alvos[] = $h1;
     }
 
-    if (empty($alvos)) return 'sem_titulo';
-
     foreach (self::MARCADORES as $flag => $padrao) {
       foreach ($alvos as $alvo) {
-        if (preg_match($padrao, $alvo)) return $flag;
+        if (preg_match($padrao, $alvo)) return ['flag' => $flag, 'detail' => NULL];
+      }
+    }
+
+    // A varredura de erro só roda no documento CONVERTIDO: no buffer cru o `u`
+    // das expressões devolveria FALSE em silêncio, e um "não achei" indistinguível
+    // de "não procurei" é justamente o defeito que derrubou a checagem de SSL.
+    if ($documento !== NULL) {
+      $erro = $this->detectarErroServidor($documento);
+      if ($erro !== NULL) return ['flag' => 'erro_pagina', 'detail' => $erro];
+    }
+
+    if (empty($alvos)) return ['flag' => 'sem_titulo', 'detail' => NULL];
+
+    return ['flag' => NULL, 'detail' => NULL];
+  }
+
+  /**
+   * Erro de servidor sendo EXIBIDO na página, e o trecho que prova.
+   *
+   * A precisão vem de exigir a assinatura inteira, nunca a palavra solta:
+   * `Warning:` aparece em página de qualquer assunto, mas `Warning: … on line
+   * 231` é o formato com que o PHP imprime, e não texto de site. Verificado
+   * contra 395 sites da base: 6 achados, nenhum falso positivo.
+   *
+   * O trecho volta junto porque "a home tem um erro" e "a home tem
+   * `Undefined variable: partnerList` em views/home.php:231" pedem ações
+   * diferentes — e quem lê o resumo por e-mail não tem o site aberto.
+   *
+   * @param  string $html documento em UTF-8
+   * @return string|null
+   */
+  private function detectarErroServidor($html)
+  {
+    foreach (self::ERROS_SERVIDOR as $padrao) {
+      if (preg_match($padrao, $html, $captura)) {
+        $trecho = $this->limparTexto($captura[0]);
+        if ($trecho === NULL) continue;
+
+        return mb_substr($trecho, 0, self::MAX_TRECHO_ERRO);
       }
     }
 
     return NULL;
-  }
-
-  /**
-   * Vencimento, emissor e validade do certificado, a partir do CERTINFO.
-   *
-   * Como a verificação de SSL está desligada, é aqui que o certificado ruim é
-   * percebido: sem esta conferência, certificado de nome errado ou autoassinado
-   * passaria por "no ar" enquanto o navegador do cliente mostra tela vermelha.
-   *
-   * Com `FOLLOWLOCATION`, o CERTINFO é o da ÚLTIMA conexão da cadeia — por isso
-   * o nome é conferido contra o host da URL final, e não contra o host pedido.
-   *
-   * @param  mixed  $certificado retorno de CURLINFO_CERTINFO
-   * @param  string $urlFinal
-   * @return array
-   */
-  private function interpretarCertificado($certificado, $urlFinal)
-  {
-    $vazio = ['expiration_date' => NULL, 'issuer' => NULL, 'status' => NULL];
-
-    if (strpos((string) $urlFinal, 'https://') !== 0) {
-      return ['expiration_date' => NULL, 'issuer' => NULL, 'status' => 'ausente'];
-    }
-
-    if (!is_array($certificado) || empty($certificado[0])) return $vazio;
-
-    $folha = $certificado[0];
-
-    $expiracao = NULL;
-    if (!empty($folha['Expire date'])) {
-      $timestamp = strtotime($folha['Expire date']);
-      if ($timestamp !== FALSE) {
-        $ano = (int) date('Y', $timestamp);
-        // Mesma guarda de sanidade do Whois_provider: data corrompida não entra.
-        if ($ano >= 1990 && $ano <= 2100) $expiracao = date('Y-m-d', $timestamp);
-      }
-    }
-
-    $emissor = NULL;
-    if (!empty($folha['Issuer'])) {
-      if (preg_match('/(?:^|,\s*)(?:CN|O)\s*=\s*([^,\/]+)/i', $folha['Issuer'], $m)) {
-        $emissor = mb_substr(trim($m[1]), 0, 150);
-      }
-    }
-
-    $status = 'ok';
-    if ($expiracao !== NULL && $expiracao < date('Y-m-d')) {
-      $status = 'vencido';
-    } elseif (!$this->certificadoCobreHost($folha, $this->hostDaUrl($urlFinal))) {
-      $status = 'nome_divergente';
-    }
-
-    return ['expiration_date' => $expiracao, 'issuer' => $emissor, 'status' => $status];
-  }
-
-  /**
-   * O certificado vale para este host? Confere SAN e, na falta dele, o CN.
-   *
-   * @param  array  $folha
-   * @param  string $host
-   * @return bool
-   */
-  private function certificadoCobreHost(array $folha, $host)
-  {
-    $host = mb_strtolower((string) $host);
-    if ($host === '') return TRUE;
-
-    $nomes = [];
-
-    if (!empty($folha['Subject Alternative Name'])) {
-      foreach (explode(',', $folha['Subject Alternative Name']) as $entrada) {
-        $entrada = trim($entrada);
-        if (stripos($entrada, 'DNS:') === 0) $nomes[] = mb_strtolower(trim(substr($entrada, 4)));
-      }
-    }
-
-    if (empty($nomes) && !empty($folha['Subject'])
-        && preg_match('/(?:^|,\s*)CN\s*=\s*([^,\/]+)/i', $folha['Subject'], $m)) {
-      $nomes[] = mb_strtolower(trim($m[1]));
-    }
-
-    // Sem nome legível não dá para afirmar divergência — e acusar por falta de
-    // dado seria inventar um problema.
-    if (empty($nomes)) return TRUE;
-
-    foreach ($nomes as $nome) {
-      if ($nome === $host) return TRUE;
-
-      if (strpos($nome, '*.') === 0) {
-        $base = substr($nome, 2);
-
-        // O curinga também cobre o DOMÍNIO NU. Pela RFC 6125, `*.foo.com` não
-        // vale para `foo.com` — mas na prática todo certificado curinga emitido
-        // hoje traz o apex junto no SAN, e quando o certificado é antigo (só CN,
-        // sem SAN) essa informação simplesmente não está visível aqui. Exigir a
-        // letra da RFC transformaria toda hospedagem com curinga num alarme
-        // permanente: foi o que aconteceu no primeiro teste com a base real.
-        if ($host === $base) return TRUE;
-
-        $sufixo = substr($nome, 1);
-        // Um nível só: *.foo.com vale para a.foo.com, não para a.b.foo.com.
-        if (substr($host, -strlen($sufixo)) === $sufixo
-            && substr_count($host, '.') === substr_count($nome, '.')) {
-          return TRUE;
-        }
-      }
-    }
-
-    return FALSE;
   }
 
   /**
