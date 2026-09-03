@@ -45,7 +45,7 @@ $temEspaco = ((float) $result->space_gb) > 0;
       </p>
     <?php } ?>
   </div>
-  <div class="col-auto ms-auto text-end mt-n1">
+  <div class="col-auto ms-auto text-end mt-n1" id="acoes_contrato">
     <?php if ($encerrado) { ?>
       <form method="POST" id="form_reabrir" action="<?php echo base_url('contratos/post_reabrir'); ?>" class="d-inline">
         <input type="hidden" name="id" value="<?php echo (int) $result->id; ?>">
@@ -66,7 +66,8 @@ $temEspaco = ((float) $result->space_gb) > 0;
       <form method="POST" id="form_excluir_contrato" action="<?php echo base_url('contratos/post_excluir'); ?>" class="d-inline">
         <input type="hidden" name="id" value="<?php echo (int) $result->id; ?>">
         <?php // Preenchido pelo Swal da confirmação: o contrato deixa de existir,
-        // e o motivo digitado ali é o que sobra no histórico para explicar por quê. ?>
+        // e o motivo digitado ali é o que sobra no histórico para explicar por quê. 
+        ?>
         <input type="hidden" name="comments" id="campo_motivo_exclusao" value="">
         <button type="button" class="btn btn-outline-danger" id="btn_excluir_contrato"><i class="fa fa-trash"></i> EXCLUIR CONTRATO</button>
       </form>
@@ -137,10 +138,13 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
       ?>
       <?php if (!empty($faturas_count)) { ?><span class="badge bg-secondary ms-1"><?php echo (int) $faturas_count; ?></span><?php } ?>
     </a></li>
+  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab_faturas_avulsas" role="tab">Faturas avulsas
+      <?php if (!empty($avulsas_count)) { ?><span class="badge bg-secondary ms-1"><?php echo (int) $avulsas_count; ?></span><?php } ?>
+    </a></li>
   <li class="nav-item">
     <a class="nav-link" data-bs-toggle="tab" href="#tab_historicos" role="tab">
       Históricos<?php // Mesma regra do badge de Faturas: zero não vira selo.
-                  if (!empty($history)) { ?><span class="badge bg-secondary ms-1"><?php echo count($history); ?></span><?php } ?>
+                if (!empty($history)) { ?><span class="badge bg-secondary ms-1"><?php echo count($history); ?></span><?php } ?>
     </a>
   </li>
 </ul>
@@ -246,17 +250,18 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
               <p class="text-muted mb-3 lh-1"><small>Define quem gera as cobranças deste contrato e como elas são emitidas.</small></p>
             </div>
             <?php // DUAS camadas, e as duas são necessárias:
-                  //
-                  //  - o `if` do PHP responde pelo estado SALVO: contrato do Bom
-                  //    Controle nunca renderiza os botões;
-                  //  - o `bloco-cdw` responde ao SELECT: trocar "Quem fatura" para o
-                  //    ERP some com eles na hora, sem esperar o SALVAR. Sem isso os
-                  //    botões continuavam à mostra prometendo uma ação que o servidor
-                  //    ia recusar.
-                  //
-                  // A recusa no servidor continua existindo nos três (generateNow,
-                  // Charge_model::lancar e json_postavisarreajuste): esconder botão
-                  // não protege endpoint. ?>
+            //
+            //  - o `if` do PHP responde pelo estado SALVO: contrato do Bom
+            //    Controle nunca renderiza os botões;
+            //  - o `bloco-cdw` responde ao SELECT: trocar "Quem fatura" para o
+            //    ERP some com eles na hora, sem esperar o SALVAR. Sem isso os
+            //    botões continuavam à mostra prometendo uma ação que o servidor
+            //    ia recusar.
+            //
+            // A recusa no servidor continua existindo nos três (generateNow,
+            // Charge_model::lancar e json_postavisarreajuste): esconder botão
+            // não protege endpoint. 
+            ?>
             <?php if ($faturaAqui) { ?>
               <div class="col-auto text-end bloco-cdw">
                 <button type="button" class="btn btn-outline-primary" id="btn_gerar_fatura"><i class="mdi mdi-file-plus-outline"></i> GERAR FATURA</button>
@@ -316,7 +321,7 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
                 <div class="form-group mb-3">
                   <label class="form-label">* Competência inicial</label>
                   <input type="text" class="form-control" name="billing[next_competence]" id="next_competence" data-mask="00/00/0000" value="<?php echo !empty($result->next_competence) ? date('d/m/Y', strtotime($result->next_competence)) : date('d/m/Y', strtotime('first day of next month')); ?>">
-                  <small class="form-text text-muted">Primeiro mês a faturar aqui.</small>
+                  <!-- <small class="form-text text-muted">Primeiro mês a faturar aqui.</small> -->
                 </div>
               </div>
               <div class="col-12 col-md-3 bloco-cdw">
@@ -337,16 +342,6 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
                   <!-- <small class="form-text text-muted">O cadastro do cliente não trazia essa informação — confirme com o financeiro.</small> -->
                 </div>
               </div>
-
-
-              <?php // O separador e o título também são `bloco-cdw`: sem isso, com o
-                    // faturamento no Bom Controle a tela mostrava o cabeçalho
-                    // "Reajustes" seguido de espaço vazio, sugerindo campo que sumiu
-                    // por bug. Reajuste é do motor daqui — no ERP quem reajusta é ele. ?>
-              <div class="col-12 bloco-cdw">
-                <hr>
-                <h6 class="mb-1">Reajustes</h6>
-              </div>
               <div class="col-12 col-md-3 bloco-cdw">
                 <div class="form-group mb-3">
                   <label class="form-label">Reajuste anual</label>
@@ -357,7 +352,7 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
                   </select>
                 </div>
               </div>
-              <div class="col-12 col-md-3 bloco-cdw bloco-reajuste">
+              <div class="col-12 col-md-3 bloco-cdw">
                 <div class="form-group mb-3">
                   <label class="form-label">* Próximo reajuste</label>
                   <input type="text" class="form-control" name="billing[next_adjustment]" id="next_adjustment" data-mask="00/00/0000" value="<?php echo !empty($result->next_adjustment) ? date('d/m/Y', strtotime($result->next_adjustment)) : date('d/m/Y', strtotime($proximo_aniversario)); ?>">
@@ -376,145 +371,94 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
             <?php } ?>
 
             <?php // Também `bloco-cdw`: os avisos de boleto, nota e reajuste saem das
-                  // rotinas DAQUI (cron_enviar_faturas, cron_enviar_notas,
-                  // cron_reajustar_contratos), e nenhuma delas olha contrato do Bom
-                  // Controle. Deixar os campos à mostra prometia um aviso que não
-                  // aconteceria.
-                  //
-                  // ESCONDER NÃO APAGA: os inputs continuam no formulário e são
-                  // enviados normalmente, então o `post_faturamento` segue gravando o
-                  // `notification_config` — que é o comportamento desejado desde a
-                  // migration 033 ("quem avisa o cliente é pergunta independente de
-                  // quem emite a cobrança, e apagar a lista ao virar a chave perderia
-                  // cadastro sem avisar"). Ao voltar para o CDW Finance, a lista
-                  // reaparece intacta. ?>
+            // rotinas DAQUI (cron_enviar_faturas, cron_enviar_notas,
+            // cron_reajustar_contratos), e nenhuma delas olha contrato do Bom
+            // Controle. Deixar os campos à mostra prometia um aviso que não
+            // aconteceria.
+            //
+            // ESCONDER NÃO APAGA: os inputs continuam no formulário e são
+            // enviados normalmente, então o `post_faturamento` segue gravando o
+            // `notification_config` — que é o comportamento desejado desde a
+            // migration 033 ("quem avisa o cliente é pergunta independente de
+            // quem emite a cobrança, e apagar a lista ao virar a chave perderia
+            // cadastro sem avisar"). Ao voltar para o CDW Finance, a lista
+            // reaparece intacta. 
+            ?>
             <div class="bloco-cdw">
-            <hr>
-            <h6 class="mb-1">Notificações ao cliente</h6>
-            <p class="text-muted mb-3">
-              <small>Para quem avisar sobre este contrato: boleto emitido, nota fiscal, aviso de reajuste.</small>
-            </p>
+              <hr>
+              <h6 class="mb-1">Notificações ao cliente</h6>
+              <p class="text-muted mb-3">
+                <small>Para quem avisar sobre este contrato: boleto emitido, nota fiscal, aviso de reajuste.</small>
+              </p>
 
-            <div class="row">
-              <div class="col-12 col-lg-6">
-                <label class="form-label">E-mails</label>
-                <div id="repeater_emails">
-                  <?php
-                  // Ao menos uma linha para o repeater ter o que clonar — e para
-                  // o campo não parecer ausente num contrato sem configuração.
-                  $linhasEmail = !empty($notification_emails) ? $notification_emails : [['email' => '', 'type' => 'destinatario']];
-                  foreach ($linhasEmail as $i => $linha) {
-                  ?>
-                    <div class="card border mb-2 linha-email">
-                      <div class="card-body p-2">
-                        <div class="row align-items-end g-2">
-                          <div class="col-12 col-sm">
-                            <label class="form-label mb-1"><small>E-mail</small></label>
-                            <input type="email" class="form-control" name="notification[emails][<?php echo (int) $i; ?>][email]" value="<?php echo htmlspecialchars((string) $linha['email'], ENT_QUOTES, 'UTF-8'); ?>" placeholder="cliente@empresa.com.br">
-                          </div>
-                          <div class="col-9 col-sm-4">
-                            <label class="form-label mb-1"><small>Tipo</small></label>
-                            <select class="form-select" name="notification[emails][<?php echo (int) $i; ?>][type]">
-                              <?php foreach ($notification_types as $slug => $rotulo) { ?>
-                                <option value="<?php echo $slug; ?>" <?php if ((string) $linha['type'] === $slug) echo 'selected=""'; ?>><?php echo $rotulo; ?></option>
-                              <?php } ?>
-                            </select>
-                          </div>
-                          <div class="col-3 col-sm-auto">
-                            <button type="button" class="btn btn-outline-danger w-100 btn-remover-linha" title="Remover"><i class="mdi mdi-trash-can-outline"></i></button>
+              <div class="row">
+                <div class="col-12 col-lg-6">
+                  <label class="form-label">E-mails</label>
+                  <div id="repeater_emails">
+                    <?php
+                    // Ao menos uma linha para o repeater ter o que clonar — e para
+                    // o campo não parecer ausente num contrato sem configuração.
+                    $linhasEmail = !empty($notification_emails) ? $notification_emails : [['email' => '', 'type' => 'destinatario']];
+                    foreach ($linhasEmail as $i => $linha) {
+                    ?>
+                      <div class="card border mb-2 linha-email">
+                        <div class="card-body p-2">
+                          <div class="row align-items-end g-2">
+                            <div class="col-12 col-sm">
+                              <label class="form-label mb-1"><small>E-mail</small></label>
+                              <input type="email" class="form-control" name="notification[emails][<?php echo (int) $i; ?>][email]" value="<?php echo htmlspecialchars((string) $linha['email'], ENT_QUOTES, 'UTF-8'); ?>" placeholder="cliente@empresa.com.br">
+                            </div>
+                            <div class="col-9 col-sm-4">
+                              <label class="form-label mb-1"><small>Tipo</small></label>
+                              <select class="form-select" name="notification[emails][<?php echo (int) $i; ?>][type]">
+                                <?php foreach ($notification_types as $slug => $rotulo) { ?>
+                                  <option value="<?php echo $slug; ?>" <?php if ((string) $linha['type'] === $slug) echo 'selected=""'; ?>><?php echo $rotulo; ?></option>
+                                <?php } ?>
+                              </select>
+                            </div>
+                            <div class="col-3 col-sm-auto">
+                              <button type="button" class="btn btn-outline-danger w-100 btn-remover-linha" title="Remover"><i class="mdi mdi-trash-can-outline"></i></button>
+                            </div>
                           </div>
                         </div>
                       </div>
-                    </div>
-                  <?php } ?>
+                    <?php } ?>
+                  </div>
+                  <button type="button" class="btn btn-sm btn-outline-primary" id="btn_add_email"><i class="mdi mdi-plus"></i> ADICIONAR E-MAIL</button>
+                  <p class="text-muted mt-1 mb-3"><small>Havendo e-mails, ao menos um precisa ser <strong>Destinatário</strong>.</small></p>
                 </div>
-                <button type="button" class="btn btn-sm btn-outline-primary" id="btn_add_email"><i class="mdi mdi-plus"></i> ADICIONAR E-MAIL</button>
-                <p class="text-muted mt-1 mb-3"><small>Havendo e-mails, ao menos um precisa ser <strong>Destinatário</strong>.</small></p>
-              </div>
 
-              <div class="col-12 col-lg-6">
-                <label class="form-label">WhatsApp</label>
-                <div id="repeater_whatsapps">
-                  <?php
-                  $linhasFone = !empty($notification_whatsapps) ? $notification_whatsapps : [['phone' => '']];
-                  foreach ($linhasFone as $i => $linha) {
-                  ?>
-                    <div class="card border mb-2 linha-whatsapp">
-                      <div class="card-body p-2">
-                        <div class="row align-items-end g-2">
-                          <div class="col">
-                            <label class="form-label mb-1"><small>Telefone</small></label>
-                            <input type="text" class="form-control phonemask" name="notification[whatsapps][<?php echo (int) $i; ?>][phone]" value="<?php echo htmlspecialchars((string) $linha['phone'], ENT_QUOTES, 'UTF-8'); ?>" placeholder="(45) 99999-9999">
-                          </div>
-                          <div class="col-auto">
-                            <button type="button" class="btn btn-outline-danger btn-remover-linha" title="Remover"><i class="mdi mdi-trash-can-outline"></i></button>
+                <div class="col-12 col-lg-6">
+                  <label class="form-label">WhatsApp</label>
+                  <div id="repeater_whatsapps">
+                    <?php
+                    $linhasFone = !empty($notification_whatsapps) ? $notification_whatsapps : [['phone' => '']];
+                    foreach ($linhasFone as $i => $linha) {
+                    ?>
+                      <div class="card border mb-2 linha-whatsapp">
+                        <div class="card-body p-2">
+                          <div class="row align-items-end g-2">
+                            <div class="col">
+                              <label class="form-label mb-1"><small>Telefone</small></label>
+                              <input type="text" class="form-control phonemask" name="notification[whatsapps][<?php echo (int) $i; ?>][phone]" value="<?php echo htmlspecialchars((string) $linha['phone'], ENT_QUOTES, 'UTF-8'); ?>" placeholder="(45) 99999-9999">
+                            </div>
+                            <div class="col-auto">
+                              <button type="button" class="btn btn-outline-danger btn-remover-linha" title="Remover"><i class="mdi mdi-trash-can-outline"></i></button>
+                            </div>
                           </div>
                         </div>
                       </div>
-                    </div>
-                  <?php } ?>
+                    <?php } ?>
+                  </div>
+                  <button type="button" class="btn btn-sm btn-outline-primary" id="btn_add_whatsapp"><i class="mdi mdi-plus"></i> ADICIONAR WHATSAPP</button>
+                  <p class="text-muted mt-1 mb-3"><small>Sem tipo: no WhatsApp cada número recebe a sua própria mensagem.</small></p>
                 </div>
-                <button type="button" class="btn btn-sm btn-outline-primary" id="btn_add_whatsapp"><i class="mdi mdi-plus"></i> ADICIONAR WHATSAPP</button>
-                <p class="text-muted mt-1 mb-3"><small>Sem tipo: no WhatsApp cada número recebe a sua própria mensagem.</small></p>
               </div>
-            </div>
-            </div><?php // fim do bloco-cdw das Notificações ?>
+            </div><?php // fim do bloco-cdw das Notificações 
+                  ?>
             <button type="submit" class="btn btn-primary"><i class="mdi mdi-content-save"></i> SALVAR FATURAMENTO</button>
           </form>
 
-          <?php if (!empty($charges)) { ?>
-            <div class="bloco-cdw">
-              <hr>
-              <h6 class="mb-2">Cobranças avulsas</h6>
-              <p class="text-muted mb-2"><small>Vendas pontuais deste contrato. Diferente da recorrência, não se repetem e não são reajustadas.</small></p>
-              <div class="table-responsive">
-                <table class="table table-striped table-bordered table-hover">
-                  <thead>
-                    <tr>
-                      <th>Lançada em</th>
-                      <th>Descrição</th>
-                      <th class="text-end">Valor</th>
-                      <th class="text-center">Parcelas</th>
-                      <th class="text-center">Competência</th>
-                      <th class="text-center">Situação</th>
-                      <th class="text-center">Ações</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <?php foreach ($charges as $cobranca) {
-                      $cancelada = ((string) $cobranca->status === 'cancelada');
-                    ?>
-                      <tr>
-                        <td><?php echo data($cobranca->created); ?></td>
-                        <td>
-                          <?php echo htmlspecialchars((string) $cobranca->description, ENT_QUOTES, 'UTF-8'); ?>
-                          <?php if (!empty($cobranca->comments)) { ?>
-                            <br /><small class="text-muted"><?php echo htmlspecialchars((string) $cobranca->comments, ENT_QUOTES, 'UTF-8'); ?></small>
-                          <?php } ?>
-                        </td>
-                        <td class="text-end">R$ <?php echo reais($cobranca->value); ?></td>
-                        <td class="text-center">
-                          <?php echo (int) $cobranca->installments; ?>×
-                          <br /><small class="text-muted"><?php echo (int) $cobranca->invoices_paid_count; ?>/<?php echo (int) $cobranca->invoices_count; ?> paga(s)</small>
-                        </td>
-                        <td class="text-center"><?php echo date('m/Y', strtotime($cobranca->competence)); ?></td>
-                        <td class="text-center">
-                          <span class="badge <?php echo $cancelada ? 'bg-secondary' : 'bg-success'; ?>"><?php echo $cancelada ? 'Cancelada' : 'Lançada'; ?></span>
-                        </td>
-                        <td class="text-center text-nowrap">
-                          <?php if (!$cancelada) { ?>
-                            <button type="button" class="btn btn-sm btn-outline-danger btn-cancelar-cobranca" data-id="<?php echo (int) $cobranca->id; ?>" data-descricao="<?php echo htmlspecialchars((string) $cobranca->description, ENT_QUOTES, 'UTF-8'); ?>" title="Cancelar a cobrança e as parcelas em aberto"><i class="mdi mdi-close"></i></button>
-                          <?php } else { ?>
-                            <span class="text-muted">—</span>
-                          <?php } ?>
-                        </td>
-                      </tr>
-                    <?php } ?>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          <?php } ?>
 
           <?php
           // Serviço do catálogo do ERP — é o item que a emissão da cobrança vai
@@ -552,6 +496,55 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
               <div class="alert alert-secondary mt-2 mb-0" role="alert">
                 <div class="alert-message">
                   <small>A integração com o Bom Controle está desativada para esta empresa — ative-a no cadastro da empresa para buscar o catálogo de serviços.</small>
+                </div>
+              </div>
+            <?php } ?>
+          </div>
+
+          <?php
+          // Categoria financeira do ERP — classifica a RECEITA deste contrato
+          // no contas a receber (etapa J). Fica no CONTRATO, e não na empresa,
+          // porque varia por contrato — é como a operação já faz hoje direto
+          // no Bom Controle. Não há padrão por tenant de propósito: um default
+          // silencioso jogaria a receita numa classificação errada, e isso só
+          // apareceria no fechamento do mês.
+          $categoriaVinculada = !empty($result->bomcontrole_category_id);
+          $recebimentoAqui = ((string) $result->invoice_policy === 'nao_emitir');
+          ?>
+          <div class="bloco-cdw">
+            <hr>
+            <div class="row">
+              <div class="col">
+                <h6 class="mb-1">Categoria financeira no Bom Controle</h6>
+                <?php if ($categoriaVinculada) { ?>
+                  <p class="mb-0">
+                    <span class="badge bg-success">#<?php echo (int) $result->bomcontrole_category_id; ?></span>
+                    <strong><?php echo htmlspecialchars((string) $result->bomcontrole_category_name, ENT_QUOTES, 'UTF-8'); ?></strong>
+                  </p>
+                <?php } else { ?>
+                  <p class="text-muted mb-0"><small>
+                      Nenhuma categoria vinculada. Ela classifica a receita deste contrato no contas a receber do ERP.
+                    </small></p>
+                <?php } ?>
+              </div>
+              <div class="col-auto text-end">
+                <button type="button" class="btn btn-outline-primary" id="btn_vincular_categoria_bc" <?php if (empty($bomcontrole_ativo)) echo 'disabled'; ?>>
+                  <i class="mdi mdi-shape-outline"></i> <?php echo $categoriaVinculada ? 'TROCAR CATEGORIA' : 'VINCULAR CATEGORIA'; ?>
+                </button>
+                <?php if ($categoriaVinculada) { ?>
+                  <button type="button" class="btn btn-outline-danger" id="btn_desvincular_categoria_bc">
+                    <i class="mdi mdi-link-variant-off"></i> DESVINCULAR
+                  </button>
+                <?php } ?>
+              </div>
+            </div>
+            <?php if (!$categoriaVinculada && $recebimentoAqui) { ?>
+              <?php // Só avisa quando o contrato DE FATO precisa: quem emite nota
+              // já ganha o título pela venda, e a etapa J nem olha para ele. 
+              ?>
+              <div class="alert alert-warning mt-2 mb-0" role="alert">
+                <div class="alert-message">
+                  <small>Este contrato é <strong>não emitir NF-e</strong>, então o título dele no ERP sai pelo contas a receber — e sem categoria a criação é <strong>recusada</strong>. O pagamento é reconhecido normalmente; o que não acontece é o lançamento no Bom Controle.</small>
                 </div>
               </div>
             <?php } ?>
@@ -776,6 +769,28 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
     </div>
   </div>
 
+  <?php // Aba própria para as avulsas, ao lado de Faturas. Cada fatura aparece
+  // em exatamente UMA das duas: a de cima recorta `id_charge = 0` e esta,
+  // `> 0`. Mostrar as duas coisas nas duas abas seria a mesma duplicação
+  // que tirou a tabela "Cobranças avulsas" do bloco de faturamento. 
+  ?>
+  <div class="tab-pane fade" id="tab_faturas_avulsas" role="tabpanel">
+    <div class="card flex-fill">
+      <div class="card-body py-3">
+        <div class="row align-items-center mb-2">
+          <div class="col">
+            <h5 class="card-title mb-0">Faturas avulsas</h5>
+            <small class="text-muted">Vendas pontuais deste contrato. Não se repetem e não são reajustadas — as canceladas continuam listadas.</small>
+          </div>
+          <div class="col-auto">
+            <button type="button" class="btn btn-outline-primary btn-sm" id="btn_atualizar_faturas_avulsas"><i class="mdi mdi-refresh"></i> ATUALIZAR</button>
+          </div>
+        </div>
+        <div id="faturas_avulsas_conteudo"></div>
+      </div>
+    </div>
+  </div>
+
   <div class="tab-pane fade" id="tab_historicos" role="tabpanel">
     <div class="card flex-fill">
       <div class="card-body py-3">
@@ -815,7 +830,7 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
               // linha é ruído, e o que importa destacar é justamente a mudança
               // que não partiu de alguém clicando.
               $origemDestaque = ((string) $h->origin !== 'painel');
-              ?>
+            ?>
               <div class="border-start border-3 <?php echo $cor['borda']; ?> ps-3 pb-3 mb-1">
                 <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
                   <span class="badge <?php echo $cor['badge']; ?>"><?php echo htmlspecialchars($meta['rotulo'], ENT_QUOTES, 'UTF-8'); ?></span>
@@ -853,7 +868,7 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
                   // Cai no próprio slug quando o motivo saiu do catálogo — o
                   // carimbo histórico não pode perder o porquê junto (032).
                   $rotuloMotivo = isset($end_reasons[$h->reason]) ? $end_reasons[$h->reason] : $h->reason;
-                  ?>
+                ?>
                   <div class="small mb-1">
                     <strong>Motivo:</strong> <?php echo htmlspecialchars($rotuloMotivo, ENT_QUOTES, 'UTF-8'); ?>
                   </div>
@@ -872,7 +887,8 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
 
           <?php // `.alert-message` obrigatório: o `.alert` do tema é `display: flex` e,
           // sem ele, cada <strong> vira um flex item — quebra em coluna e come o
-          // espaço em volta. ?>
+          // espaço em volta. 
+          ?>
           <div class="alert alert-info p-2 mt-3 mb-0 small" role="alert">
             <div class="alert-message">
               <i class="mdi mdi-information-outline"></i>
@@ -965,10 +981,6 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
   </div>
 </div>
 
-<form method="POST" id="form_cancelar_cobranca" action="<?php echo base_url('contratos/post_cancelarcobranca'); ?>">
-  <input type="hidden" name="id" value="<?php echo (int) $result->id; ?>">
-  <input type="hidden" name="id_charge" id="cancelar_cobranca_id" value="">
-</form>
 
 <!-- modal cota da conta -->
 <div class="modal fade" id="modal_quota_conta" aria-hidden="true" style="display: none;">
@@ -1259,6 +1271,40 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
 
 <!-- modal do catalogo de servicos: a busca é sob demanda porque o rate limit do
      ERP não tolera varrer os 119 serviços a cada abertura -->
+<div class="modal fade" id="modal_categoria_bc" aria-hidden="true" style="display: none;">
+  <div class="modal-dialog" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">CATEGORIA FINANCEIRA</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body m-1" style="min-height:0;">
+        <p class="text-muted">
+          <small>Como a receita deste contrato é classificada no contas a receber do ERP. A lista traz só categorias de <strong>receita</strong>.</small>
+        </p>
+        <div id="categoria_bc_aviso"></div>
+        <div class="table-responsive" style="max-height: 360px; overflow-y: auto;">
+          <table class="table table-sm table-striped table-hover mb-0">
+            <thead>
+              <tr>
+                <th style="width: 40px;"></th>
+                <th style="width: 70px;">Id</th>
+                <th>Categoria</th>
+              </tr>
+            </thead>
+            <tbody id="categoria_bc_lista"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div class="col">
+          <button type="button" class="btn w-100 btn-primary" id="btn_confirmar_categoria_bc" disabled><i class="mdi mdi-link-variant"></i> VINCULAR</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="modal fade" id="modal_servico_bc" aria-hidden="true" style="display: none;">
   <div class="modal-dialog modal-lg" role="document">
     <div class="modal-content">
@@ -1420,6 +1466,32 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
       allowZero: true
     });
 
+    // ----------------------------------------------------------------
+    // Ações de estado do contrato: suspender, reativar, encerrar e excluir
+    // falam com os painéis dos servidores antes de gravar, e num contrato com
+    // muitos domínios isso leva dezenas de segundos (o orçamento do laço de
+    // suspensão é de 240s). Sem sinal na tela a página parece travada e o
+    // usuário clica de novo — o POST repetido refaz a operação inteira nos
+    // painéis.
+    //
+    // Por isso, ao confirmar: modal de loading do rodapé (backdrop estático,
+    // sem botão de fechar) e TODOS os botões de ação desabilitados, não só o
+    // clicado — enquanto uma ação está em curso, nenhuma das outras pode
+    // começar.
+    //
+    // Não há hide: as rotinas redirecionam, e o modal morre com a página.
+    function bloquearAcoesContrato($botao, rotulo) {
+      $('#acoes_contrato button').prop('disabled', true);
+      if ($botao && $botao.length) {
+        $botao.prop('disabled', true)
+          .html('<span class="spinner-border spinner-border-sm align-middle me-1"></span> ' + rotulo);
+      }
+    }
+
+    function abrirLoadingContrato() {
+      $('#modal_loading').modal('show');
+    }
+
     // A confirmação diz quantas CONTAS a ação derruba (ou devolve), porque o
     // efeito não é só o status: no WHM e no DirectAdmin a suspensão é da conta
     // inteira, e ela sai do ar assim que o botão é confirmado.
@@ -1442,7 +1514,8 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
         confirmButtonText: suspender ? 'Suspender' : 'Reativar'
       }).then(function(result) {
         if (result.value) {
-          $('#btn_status').prop('disabled', true).html('<span class="spinner-border spinner-border-sm align-middle me-1"></span> APLICANDO...');
+          bloquearAcoesContrato($('#btn_status'), suspender ? 'SUSPENDENDO...' : 'REATIVANDO...');
+          abrirLoadingContrato();
           $('#form_status').submit();
         }
       });
@@ -1456,9 +1529,13 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
     });
 
     $('#form_encerrar').on('submit', function() {
-      $(this).find('button[type="submit"]')
-        .prop('disabled', true)
-        .html('<span class="spinner-border spinner-border-sm align-middle me-1"></span> ENCERRANDO...');
+      bloquearAcoesContrato($(this).find('button[type="submit"]'), 'ENCERRANDO...');
+
+      // O loading só entra DEPOIS de o modal do encerramento sair: dois modais
+      // abertos ao mesmo tempo empilham backdrops (o Bootstrap não suporta) e
+      // os dois ficariam visíveis, um por cima do outro. O envio não espera por
+      // isso — segue agora, e o `hidden` chega bem antes da resposta.
+      $('#modal_encerrar').one('hidden.bs.modal', abrirLoadingContrato).modal('hide');
     });
 
     // Reabrir é CORREÇÃO de engano, não retorno de cliente (cliente que volta
@@ -1476,7 +1553,14 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
         cancelButtonText: 'Cancelar',
         confirmButtonText: 'Reabrir'
       }).then(function(result) {
-        if (result.value) $('#form_reabrir').submit();
+        // Sem loading, de propósito: reabrir não reativa conta nenhuma nos
+        // painéis (o vínculo foi desfeito no encerramento), então é gravação
+        // local e instantânea — um modal piscando aqui seria ruído. O botão
+        // desabilitado basta para o POST não sair duas vezes.
+        if (result.value) {
+          bloquearAcoesContrato($('#btn_reabrir'), 'REABRINDO...');
+          $('#form_reabrir').submit();
+        }
       });
     });
 
@@ -1492,7 +1576,9 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
         input: 'textarea',
         inputLabel: 'Motivo da exclusão (opcional)',
         inputPlaceholder: 'Ex.: contrato lançado em duplicidade',
-        inputAttributes: { maxlength: 500 },
+        inputAttributes: {
+          maxlength: 500
+        },
         showCancelButton: true,
         confirmButtonColor: '#d33',
         cancelButtonColor: '#ccc',
@@ -1505,6 +1591,8 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
         // `isConfirmed`.
         if (!result.isConfirmed) return;
         $('#campo_motivo_exclusao').val(result.value || '');
+        bloquearAcoesContrato($('#btn_excluir_contrato'), 'EXCLUINDO...');
+        abrirLoadingContrato();
         $('#form_excluir_contrato').submit();
       });
     });
@@ -1879,9 +1967,9 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
           // várias contas, e preencher o campo com ele levaria a atribuir o
           // espaço inteiro a cada uma.
           $('#quota_referencia').text(
-            d.space_gb > 0
-              ? 'Espaço contratado no contrato: ' + d.space_gb.toFixed(2).replace('.', ',') + ' Gb (referência — a cota da conta pode ser menor).'
-              : 'Este contrato não tem espaço contratado definido.'
+            d.space_gb > 0 ?
+            'Espaço contratado no contrato: ' + d.space_gb.toFixed(2).replace('.', ',') + ' Gb (referência — a cota da conta pode ser menor).' :
+            'Este contrato não tem espaço contratado definido.'
           );
           $('#quota_gb').val(d.disk_limit_gb);
           $('#quota_ilimitado').prop('checked', d.disk_limit_mb === null);
@@ -1936,18 +2024,33 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
           success: function(data) {
             if (sessaoExpirou(data)) return;
             if (!data || !data.return) {
-              notificar('error', (data && data.message) ? data.message : 'Erro ao alterar a cota.');
+              // Swal e nao toast: a recusa do painel costuma ser longa (a do
+              // WHM cita o valor rejeitado) e some antes de ser lida num toast
+              // de 7s. Sem reload — o modal fica aberto com o valor digitado,
+              // que e o que permite corrigir e tentar de novo.
+              Swal.fire({
+                title: 'A cota não foi alterada',
+                html: esc((data && data.message) ? data.message : 'Erro ao alterar a cota.'),
+                icon: 'error',
+                confirmButtonText: 'Entendi'
+              });
               $btn.prop('disabled', false).html('<i class="mdi mdi-content-save"></i> SALVAR');
               return;
             }
             // Recarrega para a coluna de uso e o retrato da conta virem do banco
             // já atualizado, em vez de a tela afirmar um número que só existe no
-            // navegador.
+            // navegador. A confirmação chega pelo flashdata gravado no servidor:
+            // um toast disparado aqui morreria neste reload.
             window.location.reload();
           },
           error: function(xhr) {
             console.log(xhr.responseText);
-            notificar('error', 'Erro ao alterar a cota.');
+            Swal.fire({
+              title: 'A cota não foi alterada',
+              html: 'Não foi possível falar com o servidor. Tente de novo.',
+              icon: 'error',
+              confirmButtonText: 'Entendi'
+            });
             $btn.prop('disabled', false).html('<i class="mdi mdi-content-save"></i> SALVAR');
           }
         });
@@ -2134,9 +2237,24 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
     // Reusa esc/dataBr/moedaBr do bloco acima; a página corrente vive aqui e
     // não na URL, porque a aba é um pedaço da tela do contrato — recarregar
     // por querystring perderia a aba aberta.
-    var faturasPagina = 1;
-    var faturasCarregado = false;
-    var faturasCarregando = false;
+    // Uma entrada por aba: página, "já carregou" e a guarda de corrida são
+    // independentes — a aba de avulsas pode estar na página 2 enquanto a de
+    // recorrência está na 1, e um estado compartilhado faria uma sobrescrever
+    // a outra.
+    var listasFaturas = {
+      recorrencia: {
+        pagina: 1,
+        carregado: false,
+        carregando: false,
+        saida: "#faturas_conteudo"
+      },
+      avulsa: {
+        pagina: 1,
+        carregado: false,
+        carregando: false,
+        saida: "#faturas_avulsas_conteudo"
+      }
+    };
 
     var badgeSituacao = {
       paga: 'bg-success',
@@ -2231,13 +2349,14 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
 
       return '<tr>' +
         '<td class="text-center">' + competencia + '</td>' +
+        '<td class="text-center">' + origemRotulo(item) + '</td>' +
         '<td class="text-center">' + parcelaRotulo(item) + '</td>' +
         '<td class="text-center">' + dataBr(item.due_date) + '</td>' +
         '<td class="text-end">' + moedaBr(item.value) + '</td>' +
         '<td class="text-center"><span class="badge ' + badge + '">' + esc(rotulo) + '</span></td>' +
         '<td class="text-center">' + registroRotulo(item, registrosRotulos) + '</td>' +
         '<td class="text-center">' + boletoBotao(item) + '</td>' +
-        '<td><small>' + esc(item.description) + origemRotulo(item) + '</small></td>' +
+        '<td><small>' + esc(item.description) + '</small></td>' +
         '<td class="text-center">' + acoesFatura(item) + '</td>' +
         '</tr>';
     }
@@ -2251,26 +2370,32 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
       return esc(item.installment_number) + '/' + esc(total);
     }
 
-    // A avulsa não tem competência que a distinga da recorrência — as duas
-    // caem no mesmo mês. O marcador é o que diz de onde a linha veio.
+    // Recorrência é a esmagadora maioria das linhas — como selo, viraria ruído
+    // em toda a tabela e a avulsa deixaria de saltar. Mesma regra do `origin`
+    // no histórico do contrato: só vira selo o que foge do normal.
     function origemRotulo(item) {
-      if (!item.id_charge || parseInt(item.id_charge, 10) === 0) return '';
-      return ' <span class="badge bg-light text-dark border">avulsa</span>';
+      if (!item.id_charge || parseInt(item.id_charge, 10) === 0) {
+        return '<small class="text-muted">Recorrência</small>';
+      }
+
+      // title com a descrição da cobrança: é o que explica de onde a linha veio.
+      return '<span class="badge bg-warning text-dark" title="' + esc(item.charge_description || '') + '">Avulsa</span>';
     }
 
-    function renderFaturas(data) {
-      var $saida = $('#faturas_conteudo');
+    function renderFaturas(data, $saida, origem) {
       var rotulos = data.situations || {};
       registrosRotulos = data.registrations || {};
 
       if (!data.total) {
-        var dica = data.fatura_aqui ?
-          'Nenhuma fatura gerada ainda. Use GERAR FATURA no bloco Faturamento ou espere a rotina diária.' :
-          'Este contrato é cobrado pelo Bom Controle. Passe o faturamento para o CDW Finance no bloco Faturamento para gerar faturas aqui.';
+        var dica = !data.fatura_aqui ?
+          'Este contrato é cobrado pelo Bom Controle. Passe o faturamento para o CDW Finance no bloco Faturamento para gerar faturas aqui.' :
+          (origem === 'avulsa' ?
+            'Nenhuma cobrança avulsa lançada. Use LANÇAR COBRANÇA no bloco Faturamento.' :
+            'Nenhuma fatura gerada ainda. Use GERAR FATURA no bloco Faturamento ou espere a rotina diária.');
 
         $saida.html('<div class="text-center text-muted py-5">' +
           '<i class="mdi mdi-receipt-text-outline fs-1 d-block mb-2"></i>' +
-          '<h5 class="mb-1">Nenhuma fatura</h5>' +
+          '<h5 class="mb-1">' + (origem === 'avulsa' ? 'Nenhuma fatura avulsa' : 'Nenhuma fatura') + '</h5>' +
           '<p class="mb-0">' + dica + '</p></div>');
         return;
       }
@@ -2278,6 +2403,7 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
       var html = '<div class="table-responsive"><table class="table table-sm table-striped table-bordered table-hover mb-2">' +
         '<thead><tr>' +
         '<th class="text-center">Competência</th>' +
+        '<th class="text-center">Tipo</th>' +
         '<th class="text-center">Parcela</th>' +
         '<th class="text-center">Vencimento</th>' +
         '<th class="text-end">Valor</th>' +
@@ -2328,13 +2454,19 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
         '<div class="col-auto">' + nav + '</div></div>';
     }
 
-    function carregarFaturas(pagina) {
+    // Uma função só para as duas abas: o que muda é a ORIGEM e o alvo. Duas
+    // cópias divergiriam na primeira correção — a de paginação ou a de
+    // corrida ficaria só numa delas.
+    function carregarFaturas(pagina, origem) {
+      origem = origem || 'recorrencia';
+      var estado = listasFaturas[origem];
+
       // Sem guarda, clicar PRÓXIMA duas vezes rápido deixaria a resposta mais
       // lenta chegar por último e a tela mostraria a página errada.
-      if (faturasCarregando) return;
-      faturasCarregando = true;
+      if (estado.carregando) return;
+      estado.carregando = true;
 
-      var $saida = $('#faturas_conteudo');
+      var $saida = $(estado.saida);
       $saida.html('<div class="text-center py-4"><div class="spinner-border text-primary" role="status"></div></div>');
 
       $.ajax({
@@ -2343,40 +2475,61 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
         dataType: 'json',
         data: {
           id: <?php echo (int) $result->id; ?>,
-          pagina: pagina
+          pagina: pagina,
+          origem: origem
         },
         success: function(data) {
           if (!data || !data.success) {
             $saida.html($('<div class="alert alert-danger mb-0"><div class="alert-message"></div></div>')
               .find('.alert-message').text((data && data.message) ? data.message : 'Erro ao consultar as faturas.').end());
-            faturasCarregado = false; // deixa tentar de novo
+            estado.carregado = false; // deixa tentar de novo
             return;
           }
-          faturasPagina = data.data.pagina;
-          faturasCarregado = true;
-          renderFaturas(data.data);
+          estado.pagina = data.data.pagina;
+          estado.carregado = true;
+          renderFaturas(data.data, $saida, origem);
         },
         error: function() {
           $saida.html('<div class="alert alert-danger mb-0"><div class="alert-message">Erro de comunicação ao consultar as faturas.</div></div>');
-          faturasCarregado = false;
+          estado.carregado = false;
         },
         complete: function() {
-          faturasCarregando = false;
+          estado.carregando = false;
         }
       });
     }
 
+    // Recarrega só as abas que já foram abertas: forçar a outra a carregar
+    // gastaria uma consulta que ninguém pediu.
+    function recarregarFaturas() {
+      $.each(listasFaturas, function(origem, estado) {
+        if (estado.carregado) carregarFaturas(estado.pagina, origem);
+      });
+    }
+
     $('a[href="#tab_faturas"]').on('shown.bs.tab', function() {
-      if (!faturasCarregado) carregarFaturas(faturasPagina);
+      if (!listasFaturas.recorrencia.carregado) carregarFaturas(listasFaturas.recorrencia.pagina, 'recorrencia');
+    });
+
+    $('a[href="#tab_faturas_avulsas"]').on('shown.bs.tab', function() {
+      if (!listasFaturas.avulsa.carregado) carregarFaturas(listasFaturas.avulsa.pagina, 'avulsa');
     });
 
     $('#btn_atualizar_faturas').on('click', function() {
-      carregarFaturas(faturasPagina);
+      carregarFaturas(listasFaturas.recorrencia.pagina, 'recorrencia');
+    });
+
+    $('#btn_atualizar_faturas_avulsas').on('click', function() {
+      carregarFaturas(listasFaturas.avulsa.pagina, 'avulsa');
     });
 
     // Delegado: os botões são recriados a cada render.
     $('#faturas_conteudo').on('click', '.btn-faturas-pag', function() {
-      carregarFaturas(parseInt($(this).data('pagina'), 10) || 1);
+      carregarFaturas(parseInt($(this).data('pagina'), 10) || 1, 'recorrencia');
+    });
+
+    $('#faturas_avulsas_conteudo').on('click', '.btn-faturas-pag', function() {
+      carregarFaturas(parseInt($(this).data('pagina'), 10) || 1, 'avulsa');
     });
 
     // --- vínculo ---
@@ -2678,24 +2831,6 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
         (p.iguais ? '' : ' — a última fica em R$ ' + moedaSimples(p.ultima) + ', para a soma fechar em R$ ' + moedaSimples(valor)));
     });
 
-    $('.btn-cancelar-cobranca').on('click', function() {
-      var id = $(this).data('id');
-      var descricao = $(this).data('descricao');
-
-      Swal.fire({
-        title: 'Cancelar a cobrança?',
-        html: '<strong>' + $('<span></span>').text(descricao).html() + '</strong><br>' +
-          'As parcelas ainda em aberto são canceladas. As já pagas permanecem — o dinheiro entrou.',
-        icon: 'warning',
-        showCancelButton: true,
-        confirmButtonText: 'SIM, CANCELAR',
-        cancelButtonText: 'VOLTAR'
-      }).then(function(r) {
-        if (!r.isConfirmed) return;
-        $('#cancelar_cobranca_id').val(id);
-        $('#form_cancelar_cobranca').submit();
-      });
-    });
 
     $('#form_faturamento').on('submit', function(e) {
       if ($('#billing_source').val() !== 'cdwfinance') return;
@@ -2813,6 +2948,106 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
           $aviso.html('<div class="alert alert-danger mb-2"><div class="alert-message">Erro de comunicação ao consultar o catálogo.</div></div>');
         }
       });
+    }
+
+    // ---- Categoria financeira do contrato (etapa J) ----
+    var categoriaEscolhida = 0;
+
+    function avisoCategoria(classe, texto) {
+      $('#categoria_bc_aviso').html($('<div class="alert mb-2"><div class="alert-message"></div></div>')
+        .addClass(classe).find('.alert-message').text(texto).end());
+    }
+
+    function carregarCategorias() {
+      categoriaEscolhida = 0;
+      $('#btn_confirmar_categoria_bc').prop('disabled', true);
+      $('#categoria_bc_lista').empty();
+      avisoCategoria('alert-info', 'Buscando as categorias no Bom Controle...');
+
+      $.post('<?php echo base_url('contratos/json_postcategoriasbc'); ?>', {}, null, 'json')
+        .done(function(retorno) {
+          if (!retorno || !retorno.success) {
+            avisoCategoria('alert-danger', (retorno && retorno.message) ? retorno.message : 'Não foi possível interpretar a resposta.');
+            return;
+          }
+
+          $('#categoria_bc_aviso').empty();
+          var atual = <?php echo (int) $result->bomcontrole_category_id; ?>;
+
+          $.each(retorno.data.itens, function(i, item) {
+            var $radio = $('<input type="radio" name="categoria_bc" class="form-check-input">').val(item.id);
+            if (item.id === atual) {
+              $radio.prop('checked', true);
+              categoriaEscolhida = item.id;
+            }
+
+            // .text() e não .html(): o nome vem do cadastro do ERP, é texto livre.
+            $('#categoria_bc_lista').append($('<tr>')
+              .append($('<td>').append($radio))
+              .append($('<td>').text(item.id))
+              .append($('<td>').text(item.nome)));
+          });
+
+          $('#btn_confirmar_categoria_bc').prop('disabled', categoriaEscolhida <= 0);
+        })
+        .fail(function() {
+          avisoCategoria('alert-danger', 'Falha de comunicação ao buscar as categorias.');
+        });
+    }
+
+    $('#categoria_bc_lista').on('change', 'input[name="categoria_bc"]', function() {
+      categoriaEscolhida = parseInt($(this).val(), 10) || 0;
+      $('#btn_confirmar_categoria_bc').prop('disabled', categoriaEscolhida <= 0);
+    });
+
+    $('#btn_vincular_categoria_bc').on('click', function() {
+      $('#modal_categoria_bc').modal('show');
+      carregarCategorias();
+    });
+
+    $('#btn_confirmar_categoria_bc').on('click', function() {
+      if (categoriaEscolhida <= 0) return;
+      gravarCategoria({
+        id_categoria: categoriaEscolhida
+      });
+    });
+
+    $('#btn_desvincular_categoria_bc').on('click', function() {
+      Swal.fire({
+        title: 'Desvincular a categoria?',
+        text: 'Sem categoria, o contas a receber deste contrato passa a ser recusado no ERP.',
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonText: 'DESVINCULAR',
+        cancelButtonText: 'CANCELAR'
+      }).then(function(r) {
+        if (r.isConfirmed) gravarCategoria({
+          acao: 'desvincular'
+        });
+      });
+    });
+
+    function gravarCategoria(dados) {
+      dados.id = <?php echo (int) $result->id; ?>;
+      $('#modal_loading').modal('show');
+
+      $.post('<?php echo base_url('contratos/json_postvincularcategoriabc'); ?>', dados, null, 'json')
+        .done(function(retorno) {
+          $('#modal_loading').modal('hide');
+
+          if (retorno && retorno.success) {
+            // Recarrega para o badge e os botões refletirem o estado salvo —
+            // o toast morreria no reload, então a mensagem vai pelo Swal.
+            window.location.reload();
+            return;
+          }
+
+          Swal.fire('Não foi possível', (retorno && retorno.message) ? retorno.message : 'Resposta inesperada.', 'error');
+        })
+        .fail(function() {
+          $('#modal_loading').modal('hide');
+          Swal.fire('Não foi possível', 'Falha de comunicação.', 'error');
+        });
     }
 
     $('#btn_vincular_servico_bc').on('click', function() {
@@ -2987,8 +3222,8 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
               bootstrap.Modal.getOrCreateInstance($modalPsp[0]).hide();
               // Recarrega só a aba, sem reload de página: o usuário está no
               // meio da tela do contrato e perderia o contexto à toa.
-              if (typeof carregarFaturas === 'function') carregarFaturas(1);
-              else if (typeof carregarFaturasCliente === 'function') carregarFaturasCliente(1);
+              if (typeof recarregarFaturas === 'function') recarregarFaturas();
+              else if (typeof recarregarFaturasCliente === 'function') recarregarFaturasCliente();
               notificarPsp(retorno.data && retorno.data.pronta ? 'success' : 'info', retorno.message);
               return;
             }
@@ -3111,8 +3346,8 @@ elseif ($percentUso >= 70) $corBarra = 'bg-warning';
 
             // Recarrega só a aba: a fatura muda de situação e sai do total em
             // aberto do rodapé.
-            if (typeof carregarFaturas === 'function') carregarFaturas(1);
-            else if (typeof carregarFaturasCliente === 'function') carregarFaturasCliente(1);
+            if (typeof recarregarFaturas === 'function') recarregarFaturas();
+            else if (typeof recarregarFaturasCliente === 'function') recarregarFaturasCliente();
 
             if (typeof notificar === 'function') notificar('success', retorno.message);
             else Swal.fire('Pronto', retorno.message, 'success');

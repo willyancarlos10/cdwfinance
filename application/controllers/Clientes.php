@@ -718,11 +718,16 @@ class Clientes extends MY_Controller
       }
     }
 
-    $this->data['faturas_count'] = (int) $this->invoice_model->contarPorEscopo(
+    // Um badge por aba: Faturas conta a recorrência, Faturas avulsas conta as
+    // avulsas. Os dois saem da mesma query.
+    $contagem = $this->invoice_model->contarPorEscopo(
       'cliente',
       $id,
       (int) $this->getCurrentCompanyId()
     );
+
+    $this->data['faturas_count'] = (int) $contagem['recorrencia'];
+    $this->data['avulsas_count'] = (int) $contagem['avulsa'];
 
     $this->data['domains_by_contract'] = $porContratoDominios;
     $this->data['usage_by_contract_mb'] = $usoPorContratoMb;
@@ -1161,11 +1166,18 @@ class Clientes extends MY_Controller
     }
 
     $this->load->model('invoice_model');
+    // Mesma separação da tela do contrato: Faturas = recorrência, "Faturas
+    // avulsas" = avulsas. Origem desconhecida faz o model devolver NULL.
+    $origem = (string) $this->input->post('origem');
+    if ($origem === '') $origem = 'recorrencia';
+
     $pagina = $this->invoice_model->listarPorEscopo(
       'cliente',
       $id,
       (int) $this->getCurrentCompanyId(),
-      (int) $this->input->post('pagina')
+      (int) $this->input->post('pagina'),
+      Invoice_model::PER_PAGE_ABA,
+      $origem
     );
 
     if ($pagina === NULL) {

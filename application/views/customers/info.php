@@ -21,6 +21,7 @@ $abas = [
   ['id' => 'tab_orcamentos', 'titulo' => 'Orçamentos', 'icone' => 'mdi-file-percent-outline', 'texto' => 'Orçamentos enviados para este cliente.'],
   ['id' => 'tab_extrato', 'titulo' => 'Extrato Bom Controle', 'icone' => 'mdi-cash-multiple', 'texto' => 'Faturas, boletos e movimentações do ERP.'],
   ['id' => 'tab_faturas', 'titulo' => 'Faturas', 'icone' => 'mdi-receipt-text-outline', 'texto' => 'Faturas geradas pelo CDW Finance.'],
+  ['id' => 'tab_faturas_avulsas', 'titulo' => 'Faturas avulsas', 'icone' => 'mdi-cash-plus', 'texto' => 'Vendas pontuais dos contratos deste cliente.'],
 ];
 $badgeContratoStatus = ['vigente' => 'bg-success', 'suspenso' => 'bg-warning', 'encerrado' => 'bg-secondary'];
 // Rótulo por mapa: o ternário antigo (`=== 'vigente' ? 'Vigente' : 'Suspenso'`)
@@ -104,10 +105,19 @@ $gb = function ($valor) {
         <ul class="nav nav-pills" role="tablist">
           <?php foreach ($abas as $i => $aba) { ?>
             <li class="nav-item"><a class="nav-link <?php if ($i === 0) echo 'active'; ?>" data-bs-toggle="tab" href="#<?php echo $aba['id']; ?>" role="tab"><?php echo $aba['titulo']; ?>
-              <?php // Só a aba Faturas tem contagem — as demais carregam conteúdo
-                    // que já está na página. Zero não vira badge: a ausência diz o
-                    // mesmo sem poluir todas as abas com um "0". ?>
-              <?php if ($aba['id'] === 'tab_faturas' && !empty($faturas_count)) { ?><span class="badge bg-secondary ms-1"><?php echo (int) $faturas_count; ?></span><?php } ?>
+              <?php // Só as duas abas de fatura têm contagem — as demais carregam
+                    // conteúdo que já está na página. Zero não vira badge: a
+                    // ausência diz o mesmo sem poluir todas as abas com um "0".
+                    //
+                    // Cada uma leva o SEU número, e não o total: as duas se
+                    // dividem por origem, então um total repetido diria que há
+                    // faturas numa aba que está vazia.
+                    $contagemAba = [
+                      'tab_faturas' => (int) $faturas_count,
+                      'tab_faturas_avulsas' => (int) $avulsas_count,
+                    ];
+              ?>
+              <?php if (!empty($contagemAba[$aba['id']])) { ?><span class="badge bg-secondary ms-1"><?php echo (int) $contagemAba[$aba['id']]; ?></span><?php } ?>
             </a></li>
           <?php } ?>
         </ul>
@@ -232,6 +242,18 @@ $gb = function ($valor) {
                   </div>
                 </div>
                 <div id="faturas_cliente_conteudo"></div>
+              <?php } elseif ($aba['id'] === 'tab_faturas_avulsas') { ?>
+                <?php // Cada fatura aparece em exatamente UMA das duas abas: esta
+                      // recorta `id_charge > 0` e a de Faturas, `= 0`. ?>
+                <div class="row align-items-center mb-2">
+                  <div class="col">
+                    <span class="text-muted">Vendas pontuais dos contratos deste cliente. Não se repetem e não são reajustadas — as canceladas continuam listadas.</span>
+                  </div>
+                  <div class="col-auto text-end">
+                    <button type="button" class="btn btn-sm btn-outline-primary" id="btn_atualizar_avulsas_cliente"><i class="mdi mdi-refresh"></i> ATUALIZAR</button>
+                  </div>
+                </div>
+                <div id="avulsas_cliente_conteudo"></div>
               <?php } else { ?>
                 <div class="text-center text-muted py-5">
                   <i class="mdi <?php echo $aba['icone']; ?> fs-1 d-block mb-2"></i>
@@ -1071,9 +1093,12 @@ $gb = function ($valor) {
     // Mesma paginação da aba do contrato; a diferença é a coluna Contrato,
     // que aqui é necessária (a lista mistura contratos) e lá seria uma coluna
     // com o mesmo valor em todas as linhas.
-    var faturasClientePagina = 1;
-    var faturasClienteCarregado = false;
-    var faturasClienteCarregando = false;
+    // Uma entrada por aba — página, "já carregou" e guarda de corrida são
+    // independentes, senão uma aba sobrescreveria o estado da outra.
+    var listasFaturas = {
+      recorrencia: { pagina: 1, carregado: false, carregando: false, saida: "#faturas_cliente_conteudo" },
+      avulsa: { pagina: 1, carregado: false, carregando: false, saida: "#avulsas_cliente_conteudo" }
+    };
 
     var badgeSituacao = {
       paga: 'bg-success',
@@ -1171,40 +1196,49 @@ $gb = function ($valor) {
       return '<tr>' +
         '<td class="text-center">' + contrato + '</td>' +
         '<td class="text-center">' + competencia + '</td>' +
+        '<td class="text-center">' + origemRotulo(item) + '</td>' +
         '<td class="text-center">' + parcelaRotulo(item) + '</td>' +
         '<td class="text-center">' + dataBr(item.due_date) + '</td>' +
         '<td class="text-end">' + moedaBr(item.value) + '</td>' +
         '<td class="text-center"><span class="badge ' + badge + '">' + esc(rotulo) + '</span></td>' +
         '<td class="text-center">' + registroRotulo(item, registrosRotulos) + '</td>' +
         '<td class="text-center">' + boletoBotao(item) + '</td>' +
-        '<td><small>' + esc(item.description) + origemRotulo(item) + '</small></td>' +
+        '<td><small>' + esc(item.description) + '</small></td>' +
         '<td class="text-center">' + acoesFatura(item) + '</td>' +
         '</tr>';
     }
 
-    // Mesma regra da aba do contrato: "1/1" vira travessão, e a avulsa ganha
-    // marcador porque cai no mesmo mês da recorrência.
+    // Mesma regra da aba do contrato: "1/1" vira travessão — repetir isso em
+    // toda linha de contrato mensal esconde as poucas de fato parceladas.
     function parcelaRotulo(item) {
       var total = parseInt(item.installments_total, 10) || 1;
       if (total <= 1) return '<span class="text-muted">—</span>';
       return esc(item.installment_number) + '/' + esc(total);
     }
 
+    // Recorrência é a esmagadora maioria das linhas — como selo, viraria ruído
+    // em toda a tabela e a avulsa deixaria de saltar. Mesma regra do `origin`
+    // no histórico do contrato: só vira selo o que foge do normal.
     function origemRotulo(item) {
-      if (!item.id_charge || parseInt(item.id_charge, 10) === 0) return '';
-      return ' <span class="badge bg-light text-dark border">avulsa</span>';
+      if (!item.id_charge || parseInt(item.id_charge, 10) === 0) {
+        return '<small class="text-muted">Recorrência</small>';
+      }
+
+      // title com a descrição da cobrança: é o que explica de onde a linha veio.
+      return '<span class="badge bg-warning text-dark" title="' + esc(item.charge_description || '') + '">Avulsa</span>';
     }
 
-    function renderFaturasCliente(data) {
-      var $saida = $('#faturas_cliente_conteudo');
+    function renderFaturasCliente(data, $saida, origem) {
       var rotulos = data.situations || {};
       registrosRotulos = data.registrations || {};
 
       if (!data.total) {
         $saida.html('<div class="text-center text-muted py-5">' +
           '<i class="mdi mdi-receipt-text-outline fs-1 d-block mb-2"></i>' +
-          '<h5 class="mb-1">Nenhuma fatura</h5>' +
-          '<p class="mb-0">Nenhum contrato deste cliente é faturado pelo CDW Finance ainda. A configuração fica no bloco Faturamento de cada contrato.</p></div>');
+          '<h5 class="mb-1">' + (origem === 'avulsa' ? 'Nenhuma fatura avulsa' : 'Nenhuma fatura') + '</h5>' +
+          '<p class="mb-0">' + (origem === 'avulsa' ?
+            'Nenhuma cobrança avulsa lançada nos contratos deste cliente. Elas são lançadas na tela do contrato.' :
+            'Nenhum contrato deste cliente é faturado pelo CDW Finance ainda. A configuração fica no bloco Faturamento de cada contrato.') + '</p></div>');
         return;
       }
 
@@ -1212,6 +1246,7 @@ $gb = function ($valor) {
         '<thead><tr>' +
         '<th class="text-center">Contrato</th>' +
         '<th class="text-center">Competência</th>' +
+        '<th class="text-center">Tipo</th>' +
         '<th class="text-center">Parcela</th>' +
         '<th class="text-center">Vencimento</th>' +
         '<th class="text-end">Valor</th>' +
@@ -1259,11 +1294,16 @@ $gb = function ($valor) {
         '<div class="col-auto">' + nav + '</div></div>';
     }
 
-    function carregarFaturasCliente(pagina) {
-      if (faturasClienteCarregando) return;
-      faturasClienteCarregando = true;
+    // Uma função para as duas abas: muda a ORIGEM e o alvo. Duas cópias
+    // divergiriam na primeira correção.
+    function carregarFaturasCliente(pagina, origem) {
+      origem = origem || 'recorrencia';
+      var estado = listasFaturas[origem];
 
-      var $saida = $('#faturas_cliente_conteudo');
+      if (estado.carregando) return;
+      estado.carregando = true;
+
+      var $saida = $(estado.saida);
       $saida.html('<div class="text-center py-4"><div class="spinner-border text-primary" role="status"></div></div>');
 
       $.ajax({
@@ -1272,39 +1312,59 @@ $gb = function ($valor) {
         dataType: 'json',
         data: {
           id: <?php echo (int) $result->id; ?>,
-          pagina: pagina
+          pagina: pagina,
+          origem: origem
         },
         success: function(data) {
           if (!data || !data.success) {
             $saida.html($('<div class="alert alert-danger mb-0"><div class="alert-message"></div></div>')
               .find('.alert-message').text((data && data.message) ? data.message : 'Erro ao consultar as faturas.').end());
-            faturasClienteCarregado = false;
+            estado.carregado = false;
             return;
           }
-          faturasClientePagina = data.data.pagina;
-          faturasClienteCarregado = true;
-          renderFaturasCliente(data.data);
+          estado.pagina = data.data.pagina;
+          estado.carregado = true;
+          renderFaturasCliente(data.data, $saida, origem);
         },
         error: function() {
           $saida.html('<div class="alert alert-danger mb-0"><div class="alert-message">Erro de comunicação ao consultar as faturas.</div></div>');
-          faturasClienteCarregado = false;
+          estado.carregado = false;
         },
         complete: function() {
-          faturasClienteCarregando = false;
+          estado.carregando = false;
         }
       });
     }
 
+    // Recarrega só as abas já abertas, mantendo a página de cada uma.
+    function recarregarFaturasCliente() {
+      $.each(listasFaturas, function(origem, estado) {
+        if (estado.carregado) carregarFaturasCliente(estado.pagina, origem);
+      });
+    }
+
     $('a[href="#tab_faturas"]').on('shown.bs.tab', function() {
-      if (!faturasClienteCarregado) carregarFaturasCliente(faturasClientePagina);
+      if (!listasFaturas.recorrencia.carregado) carregarFaturasCliente(listasFaturas.recorrencia.pagina, 'recorrencia');
+    });
+
+    $('a[href="#tab_faturas_avulsas"]').on('shown.bs.tab', function() {
+      if (!listasFaturas.avulsa.carregado) carregarFaturasCliente(listasFaturas.avulsa.pagina, 'avulsa');
     });
 
     $('#btn_atualizar_faturas_cliente').on('click', function() {
-      carregarFaturasCliente(faturasClientePagina);
+      carregarFaturasCliente(listasFaturas.recorrencia.pagina, 'recorrencia');
+    });
+
+    $('#btn_atualizar_avulsas_cliente').on('click', function() {
+      carregarFaturasCliente(listasFaturas.avulsa.pagina, 'avulsa');
     });
 
     $('#faturas_cliente_conteudo').on('click', '.btn-faturas-cliente-pag', function() {
-      carregarFaturasCliente(parseInt($(this).data('pagina'), 10) || 1);
+      carregarFaturasCliente(parseInt($(this).data('pagina'), 10) || 1, 'recorrencia');
+    });
+
+    $('#avulsas_cliente_conteudo').on('click', '.btn-faturas-cliente-pag', function() {
+      carregarFaturasCliente(parseInt($(this).data('pagina'), 10) || 1, 'avulsa');
     });
 
     // Sincronização do cadastro com o Bom Controle, sob demanda.
@@ -1383,8 +1443,8 @@ $gb = function ($valor) {
               bootstrap.Modal.getOrCreateInstance($modalPsp[0]).hide();
               // Recarrega só a aba, sem reload de página: o usuário está no
               // meio da tela do contrato e perderia o contexto à toa.
-              if (typeof carregarFaturas === 'function') carregarFaturas(1);
-              else if (typeof carregarFaturasCliente === 'function') carregarFaturasCliente(1);
+              if (typeof recarregarFaturas === 'function') recarregarFaturas();
+              else if (typeof recarregarFaturasCliente === 'function') recarregarFaturasCliente();
               notificarPsp(retorno.data && retorno.data.pronta ? 'success' : 'info', retorno.message);
               return;
             }
@@ -1504,8 +1564,8 @@ $gb = function ($valor) {
 
             // Recarrega só a aba: a fatura muda de situação e sai do total em
             // aberto do rodapé.
-            if (typeof carregarFaturas === 'function') carregarFaturas(1);
-            else if (typeof carregarFaturasCliente === 'function') carregarFaturasCliente(1);
+            if (typeof recarregarFaturas === 'function') recarregarFaturas();
+            else if (typeof recarregarFaturasCliente === 'function') recarregarFaturasCliente();
 
             if (typeof notificar === 'function') notificar('success', retorno.message);
             else Swal.fire('Pronto', retorno.message, 'success');

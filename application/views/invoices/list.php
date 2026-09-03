@@ -13,6 +13,11 @@ if ($situacaoAtual !== '' && isset($situations[$situacaoAtual])) {
   $chips[] = 'Situação: ' . $situations[$situacaoAtual];
 }
 
+$origemAtual = isset($avancado['origin']) ? (string) $avancado['origin'] : '';
+if ($origemAtual !== '' && isset($origins[$origemAtual])) {
+  $chips[] = 'Tipo: ' . $origins[$origemAtual];
+}
+
 $de = isset($avancado['vencimento_de']) ? (string) $avancado['vencimento_de'] : '';
 $ate = isset($avancado['vencimento_ate']) ? (string) $avancado['vencimento_ate'] : '';
 if ($de !== '') $chips[] = 'Vence a partir de ' . date('d/m/Y', strtotime($de));
@@ -102,6 +107,7 @@ $badgeSituacao = [
                 <tr>
                   <th>Cliente</th>
                   <th class="text-center">Competência</th>
+                  <th class="text-center">Tipo</th>
                   <th class="text-center">Parcela</th>
                   <th class="text-center">Vencimento</th>
                   <th class="text-end">Valor</th>
@@ -124,6 +130,18 @@ $badgeSituacao = [
                       <small class="text-muted"><?php echo cnpj((string) $fatura->customer_document); ?></small>
                     </td>
                     <td class="text-center"><?php echo date('m/Y', strtotime($fatura->competence)); ?></td>
+                    <?php // Recorrência é a esmagadora maioria das linhas — como selo, ela
+                          // viraria ruído em toda a tabela e a avulsa deixaria de saltar.
+                          // Mesma regra do `origin` no histórico do contrato: só vira selo o
+                          // que foge do normal. O título traz a descrição da cobrança, que é
+                          // o que explica de onde a linha veio. ?>
+                    <td class="text-center">
+                      <?php if ((int) $fatura->id_charge > 0) { ?>
+                        <span class="badge bg-warning text-dark" title="<?php echo htmlspecialchars((string) $fatura->charge_description, ENT_QUOTES, 'UTF-8'); ?>">Avulsa</span>
+                      <?php } else { ?>
+                        <small class="text-muted">Recorrência</small>
+                      <?php } ?>
+                    </td>
                     <td class="text-center">
                       <?php
                       // "1/1" em toda linha de contrato mensal seria ruído que
@@ -213,9 +231,6 @@ $badgeSituacao = [
                     </td>
                     <td>
                       <small><?php echo htmlspecialchars((string) $fatura->description, ENT_QUOTES, 'UTF-8'); ?></small>
-                      <?php if ((int) $fatura->id_charge > 0) { ?>
-                        <span class="badge bg-light text-dark border">avulsa</span>
-                      <?php } ?>
                     </td>
                     <td class="text-center text-nowrap">
                       <?php // Só fatura aberta e já com provedor tem o que resolver no banco. ?>
@@ -305,6 +320,15 @@ $badgeSituacao = [
           <option value="">Todas</option>
           <?php foreach ($situations as $slug => $rotulo) { ?>
             <option value="<?php echo $slug; ?>" <?php if ($situacaoAtual === $slug) echo 'selected=""'; ?>><?php echo $rotulo; ?></option>
+          <?php } ?>
+        </select>
+      </div>
+      <div class="mb-3">
+        <label class="form-label">Tipo</label>
+        <select class="form-select" name="<?php echo $filtro_avancado; ?>[origin]">
+          <option value="">Todos</option>
+          <?php foreach ($origins as $slug => $rotulo) { ?>
+            <option value="<?php echo $slug; ?>" <?php if ($origemAtual === $slug) echo 'selected=""'; ?>><?php echo $rotulo; ?></option>
           <?php } ?>
         </select>
       </div>

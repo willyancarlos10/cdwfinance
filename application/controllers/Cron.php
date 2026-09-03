@@ -635,6 +635,71 @@ class Cron extends CI_Controller
    * ⚠️ ESTA ROTINA ESCREVE NO ERP DE PRODUÇÃO. A primeira execução deve ser
    * supervisionada, num contrato de valor baixo — ver os riscos no ROADMAP.
    */
+  /**
+   * Cria no ERP o contas a receber das faturas liquidadas (etapa J).
+   *
+   * ⚠️ **ESCREVE no financeiro do Bom Controle.** Não emite nota nem boleto —
+   * cria só o título contra o qual o crédito do extrato bancário vai ser
+   * conciliado. Ainda assim, título criado errado é lançamento a corrigir à
+   * mão no ERP: a primeira execução merece a saída à vista.
+   *
+   * Só entram faturas de contrato `nao_emitir`, e quem garante isso é o
+   * `enfileirarRecebimento()` — ver o porquê lá.
+   *
+   * @return void
+   */
+  public function cron_criar_recebimentos()
+  {
+    if (!$this->isCronActive('cron_criar_recebimentos')) return;
+
+    @set_time_limit(0);
+
+    $lockHandle = $this->travar('cron_criar_recebimentos');
+    if ($lockHandle === FALSE) return;
+
+    $this->load->model('bomcontrole_model');
+
+    $idUser = (int) $this->config->item('id_user_process_auto');
+    $faturas = $this->bomcontrole_model->filaRecebimentos();
+
+    echo 'cron_criar_recebimentos: ' . count($faturas) . ' fatura(s) na fila.' . PHP_EOL;
+
+    $criados = 0;
+    $falhas = 0;
+    $mensagensDeErro = [];
+
+    foreach ($faturas as $fatura) {
+      $rotulo = 'fatura #' . (int) $fatura->id;
+
+      try {
+        $r = $this->bomcontrole_model->criarRecebimento((int) $fatura->id, (int) $fatura->id_company, $idUser);
+      } catch (Throwable $e) {
+        $r = ['success' => FALSE, 'message' => $e->getMessage(), 'data' => []];
+      }
+
+      if (empty($r['success'])) {
+        $falhas++;
+        $definitivo = !empty($r['data']['definitivo']) ? ' [DEFINITIVO]' : '';
+        $mensagensDeErro[] = $rotulo . ': ' . $r['message'] . $definitivo;
+        echo "  [ERRO]{$definitivo} {$rotulo}: {$r['message']}" . PHP_EOL;
+      } else {
+        $criados++;
+        echo "  [OK]   {$rotulo}: {$r['message']}" . PHP_EOL;
+      }
+
+      usleep(Bomcontrole_model::AR_ESPACAMENTO_MICROSSEGUNDOS);
+    }
+
+    $this->global_model->edit('crm_cron_logs', [
+      'modified' => date('Y-m-d H:i:s'),
+      'errors' => empty($mensagensDeErro) ? NULL : mb_substr(implode(' | ', $mensagensDeErro), 0, 5000),
+    ], 'name', 'cron_criar_recebimentos');
+
+    $this->destravar($lockHandle);
+
+    echo "Concluído: {$criados} título(s) criado(s), {$falhas} com erro." . PHP_EOL;
+  }
+
   public function cron_emitir_notas()
   {
     if (!$this->isCronActive('cron_emitir_notas')) return;

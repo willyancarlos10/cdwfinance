@@ -192,6 +192,48 @@
                             <button type="submit" class="btn btn-primary btn-sm">SALVAR</button>
                             <button type="button" class="btn btn-outline-primary btn-sm" id="btn_testar_bomcontrole" <?php if (empty($bomcontrole_key_set)) echo 'disabled'; ?>>TESTAR CONEXÃO</button>
                         </form>
+
+                        <hr>
+
+                        <?php // Conta a receber (etapa J). Os dois ids são OBRIGATÓRIOS no
+                              // `Financeiro/CriarOutroRecebimento` e não têm como ser
+                              // adivinhados — sem eles a fila falha na primeira guarda,
+                              // antes de qualquer chamada ao ERP.
+                              //
+                              // Fica FORA do <form> de cima de propósito: aquele form grava a
+                              // chave da API, e um submit dele com estes selects vazios
+                              // apagaria o vínculo. Aqui a gravação é AJAX e só toca as
+                              // colunas escolhidas. ?>
+                        <h6 class="mb-1">Conta a receber</h6>
+                        <p class="text-muted small">
+                            Em qual conta entra o dinheiro quando uma cobrança é liquidada. A <strong>categoria financeira</strong> não fica aqui — ela classifica a receita e varia por contrato, então é escolhida na tela de cada contrato.
+                        </p>
+
+                        <div class="row g-2 align-items-end">
+                            <div class="col-md-8">
+                                <label class="form-label mb-1">Conta financeira</label>
+                                <select class="form-select form-select-sm" id="bc_conta" disabled>
+                                    <?php if (!empty($bomcontrole_account_id)) { ?>
+                                        <option value="<?php echo (int) $bomcontrole_account_id; ?>" selected><?php echo html_escape($bomcontrole_account_name !== '' ? $bomcontrole_account_name : ('#' . (int) $bomcontrole_account_id)); ?></option>
+                                    <?php } else { ?>
+                                        <option value="">— não definida —</option>
+                                    <?php } ?>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="mt-2">
+                            <button type="button" class="btn btn-outline-secondary btn-sm" id="btn_carregar_financeiro" <?php if (empty($bomcontrole_key_set) || empty($bomcontrole_company_id)) echo 'disabled'; ?>>
+                                <i class="mdi mdi-cloud-download-outline"></i> CARREGAR DO BOM CONTROLE
+                            </button>
+                            <button type="button" class="btn btn-primary btn-sm d-none" id="btn_salvar_financeiro">SALVAR CONTA</button>
+                        </div>
+                        <small class="text-muted d-block mt-1">
+                            <?php if (empty($bomcontrole_company_id)) { ?>
+                                Resolva antes o <strong>Id da empresa</strong> — a listagem de contas do ERP exige o IdEmpresa.
+                            <?php } else { ?>
+                                A busca é sob demanda: o ERP devolve 429 em poucas chamadas seguidas, e o nome fica gravado junto do id para a tela não precisar ir à rede.
+                            <?php } ?>
+                        </small>
                         <div id="resultado_teste_bomcontrole" class="mt-3"></div>
                         <div class="alert alert-info mt-3 mb-0" role="alert">
                             <div class="alert-message">
@@ -319,14 +361,6 @@
                                                 <small class="text-muted">Gravado cifrado e nunca devolvido para a tela — por isso o campo nasce sempre em branco.</small>
                                             </div>
 
-                                            <div class="mb-3">
-                                                <label class="form-label" for="psp_conta_<?php echo $psp_slug; ?>">Conta corrente <span class="text-muted">(opcional)</span></label>
-                                                <input type="text" class="form-control" id="psp_conta_<?php echo $psp_slug; ?>" name="psp_config[conta_corrente]" maxlength="30" value="<?php
-                                                                                                                                                                                        $psp_extra = !empty($psp_conta) ? json_decode((string) $psp_conta->extra, TRUE) : [];
-                                                                                                                                                                                        echo htmlspecialchars(is_array($psp_extra) && isset($psp_extra['conta_corrente']) ? (string) $psp_extra['conta_corrente'] : '', ENT_QUOTES, 'UTF-8');
-                                                                                                                                                                                        ?>">
-                                                <small class="text-muted">Só é necessária quando a mesma integração atende mais de uma conta — em branco, o banco usa a conta padrão.</small>
-                                            </div>
 
                                             <hr>
 
@@ -1126,6 +1160,92 @@
         })
         .fail(function() {
           $saida.html('<div class="alert alert-danger mb-0"><div class="alert-message">Falha de comunicação ao procurar a empresa.</div></div>');
+        })
+        .always(function() {
+          $botao.prop('disabled', false);
+        });
+    });
+
+    // ---- Conta a receber: carrega os catálogos e grava a escolha ----
+    // Guarda o que já está salvo para reselecionar depois de popular: sem
+    // isso, carregar a lista jogaria o select na primeira opção e um SALVAR
+    // distraído trocaria a conta configurada.
+    var contaSalva = <?php echo (int) $bomcontrole_account_id; ?>;
+
+    function popularSelect($select, itens, selecionado) {
+      $select.empty().append($('<option>').val('').text('— selecione —'));
+
+      $.each(itens, function(i, item) {
+        var rotulo = item.nome;
+        if (item.tipo) rotulo += ' (' + item.tipo + (item.banco ? ' · ' + item.banco : '') + ')';
+
+        // .text() e não .html(): nome de conta e categoria é texto livre,
+        // digitado por quem opera o ERP.
+        $select.append($('<option>').val(item.id).text(rotulo));
+      });
+
+      if (selecionado) $select.val(String(selecionado));
+      $select.prop('disabled', false);
+    }
+
+    $('#btn_carregar_financeiro').on('click', function() {
+      var $botao = $(this);
+      var $saida = $('#resultado_teste_bomcontrole');
+
+      $botao.prop('disabled', true);
+      $saida.html('<div class="alert alert-info mb-0"><div class="alert-message">Carregando contas e categorias do Bom Controle...</div></div>');
+
+      $.post('<?php echo base_url('empresas/json_postfinanceirobomcontrole'); ?>', {
+          id: <?php echo (int) $result->id; ?>
+        }, null, 'json')
+        .done(function(retorno) {
+          if (!retorno || !retorno.success) {
+            var erro = retorno && retorno.message ? retorno.message : 'Não foi possível interpretar a resposta.';
+            $saida.html($('<div class="alert alert-danger mb-0"><div class="alert-message"></div></div>')
+              .find('.alert-message').text(erro).end());
+            return;
+          }
+
+          popularSelect($('#bc_conta'), retorno.data.contas, contaSalva);
+
+          $('#btn_salvar_financeiro').removeClass('d-none');
+          $saida.html('<div class="alert alert-success mb-0"><div class="alert-message">Contas carregadas. Escolha a conta e salve.</div></div>');
+        })
+        .fail(function() {
+          $saida.html('<div class="alert alert-danger mb-0"><div class="alert-message">Falha de comunicação ao carregar os catálogos.</div></div>');
+        })
+        .always(function() {
+          $botao.prop('disabled', false);
+        });
+    });
+
+    $('#btn_salvar_financeiro').on('click', function() {
+      var $botao = $(this);
+      var $saida = $('#resultado_teste_bomcontrole');
+      var idConta = parseInt($('#bc_conta').val(), 10) || 0;
+
+      if (idConta <= 0) {
+        $saida.html('<div class="alert alert-warning mb-0"><div class="alert-message">Escolha a conta financeira.</div></div>');
+        return;
+      }
+
+      $botao.prop('disabled', true);
+
+      $.post('<?php echo base_url('empresas/json_postsalvarfinanceirobomcontrole'); ?>', {
+          id: <?php echo (int) $result->id; ?>,
+          id_conta: idConta
+        }, null, 'json')
+        .done(function(retorno) {
+          var ok = retorno && retorno.success;
+          var texto = retorno && retorno.message ? retorno.message : 'Não foi possível interpretar a resposta.';
+
+          $saida.html($('<div class="alert mb-0"><div class="alert-message"></div></div>')
+            .addClass(ok ? 'alert-success' : 'alert-danger').find('.alert-message').text(texto).end());
+
+          if (ok) setTimeout(function() { window.location.reload(); }, 1200);
+        })
+        .fail(function() {
+          $saida.html('<div class="alert alert-danger mb-0"><div class="alert-message">Falha de comunicação ao gravar.</div></div>');
         })
         .always(function() {
           $botao.prop('disabled', false);

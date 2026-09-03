@@ -676,25 +676,60 @@ class Invoice_model extends CI_Model
      * @param  int    $idCompany
      * @return int|null
      */
+    /**
+     * Contagem para os badges das abas, separada por ORIGEM.
+     *
+     * Devolve os dois números na MESMA query: as abas Faturas e Faturas
+     * avulsas são desenhadas na mesma requisição, e dois COUNT pagariam duas
+     * varreduras pelo mesmo recorte. `id_charge` é sentinela 0 na recorrência
+     * (migration 031).
+     *
+     * @param  string $escopo 'contrato' | 'cliente'
+     * @param  int    $id
+     * @param  int    $idCompany
+     * @return array|null ['total','recorrencia','avulsa']; NULL em escopo inválido
+     */
     public function contarPorEscopo($escopo, $id, $idCompany)
     {
         $colunas = ['contrato' => 'id_contract', 'cliente' => 'id_customer'];
         if (!isset($colunas[(string) $escopo])) return NULL;
 
         $consulta = $this->db->query(
-            "SELECT COUNT(*) AS n FROM crm_invoices WHERE id_company = ? AND {$colunas[(string) $escopo]} = ?",
+            "SELECT COUNT(*) AS total,
+                    COALESCE(SUM(id_charge = 0), 0) AS recorrencia,
+                    COALESCE(SUM(id_charge > 0), 0) AS avulsa
+               FROM crm_invoices
+              WHERE id_company = ? AND {$colunas[(string) $escopo]} = ?",
             [(int) $idCompany, (int) $id]
         );
 
-        return ($consulta === FALSE) ? 0 : (int) $consulta->row()->n;
+        if ($consulta === FALSE) return ['total' => 0, 'recorrencia' => 0, 'avulsa' => 0];
+
+        $linha = $consulta->row();
+
+        return [
+            'total' => (int) $linha->total,
+            'recorrencia' => (int) $linha->recorrencia,
+            'avulsa' => (int) $linha->avulsa,
+        ];
     }
 
-    public function listarPorEscopo($escopo, $id, $idCompany, $pagina = 1, $porPagina = self::PER_PAGE_ABA)
+    public function listarPorEscopo($escopo, $id, $idCompany, $pagina = 1, $porPagina = self::PER_PAGE_ABA, $origem = 'todas')
     {
         $colunas = ['contrato' => 'id_contract', 'cliente' => 'id_customer'];
         if (!isset($colunas[(string) $escopo])) return NULL;
 
+        // A origem recorta recorrência x avulsa, e é o que separa as duas abas.
+        // `id_charge` é sentinela 0 na recorrência (migration 031), então a
+        // condição é `= 0` / `> 0` — nunca vinda do POST: valor desconhecido é
+        // ERRO, e não "traz tudo", mesma regra da allowlist do escopo. Sem
+        // isso, um recorte silenciosamente ignorado faria a aba "avulsas"
+        // mostrar a recorrência junto.
+        $origens = ['todas' => '', 'recorrencia' => ' AND id_charge = 0', 'avulsa' => ' AND id_charge > 0'];
+        if (!isset($origens[(string) $origem])) return NULL;
+
         $coluna = $colunas[(string) $escopo];
+        $recorte = $origens[(string) $origem];
         $binds = [(int) $idCompany, (int) $id];
 
         // Totais na mesma pergunta que a contagem: "quanto falta receber" é o
@@ -707,7 +742,7 @@ class Invoice_model extends CI_Model
                     COALESCE(SUM(CASE WHEN situation IN ('a_vencer', 'vencida') THEN value ELSE 0 END), 0) AS aberto,
                     COALESCE(SUM(CASE WHEN situation = 'vencida' THEN value ELSE 0 END), 0) AS vencido
                FROM crm_invoices_v
-              WHERE id_company = ? AND {$coluna} = ?",
+              WHERE id_company = ? AND {$coluna} = ?{$recorte}",
             $binds
         );
 
@@ -736,7 +771,7 @@ class Invoice_model extends CI_Model
                         charge_description, contract_cycle, contract_status, created,
                         psp, registration, linha_digitavel, link_pix
                    FROM crm_invoices_v
-                  WHERE id_company = ? AND {$coluna} = ?
+                  WHERE id_company = ? AND {$coluna} = ?{$recorte}
                   ORDER BY due_date DESC, id DESC
                   LIMIT " . (int) $porPagina . " OFFSET " . (int) $offset,
                 $binds

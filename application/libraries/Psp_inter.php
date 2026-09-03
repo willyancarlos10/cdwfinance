@@ -792,12 +792,13 @@ class Psp_inter extends Psp_provider
             'Accept: */*',
         ];
 
-        // Uma mesma integração pode atender mais de uma conta corrente; sem o
-        // header, o Inter escolhe a padrão — que pode não ser a do tenant.
-        $conta = trim((string) ($config['conta_corrente'] ?? ''));
-        if ($conta !== '') {
-            $headers[] = 'x-conta-corrente: ' . $conta;
-        }
+        // O `x-conta-corrente` NÃO é enviado: sem ele o Inter usa a conta
+        // PADRÃO da integração, que é o comportamento desejado aqui. O header
+        // só faria diferença se o mesmo `client_id` atendesse mais de uma
+        // conta — caso que não existe nesta operação. Não reintroduzir
+        // copiando da documentação do banco: o campo saiu da tela junto, e um
+        // header alimentado por configuração que ninguém preenche é pior que
+        // header nenhum.
 
         $opcoes = $mtls + [
             CURLOPT_RETURNTRANSFER => TRUE,

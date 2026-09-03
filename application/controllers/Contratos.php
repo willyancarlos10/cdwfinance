@@ -183,22 +183,29 @@ class Contratos extends MY_Controller
     // aba), então sem este número a tela não sabe dizer se há faturas antes
     // de alguém clicar — que é justamente o que o badge existe para responder.
     $this->load->model('invoice_model');
-    $this->data['faturas_count'] = (int) $this->invoice_model->contarPorEscopo(
+    // Os dois badges saem da MESMA contagem: Faturas mostra a recorrência e
+    // "Faturas avulsas" mostra as avulsas, então cada aba precisa do seu
+    // número — um badge com o total diria que há faturas numa aba vazia.
+    $contagem = $this->invoice_model->contarPorEscopo(
       'contrato',
       (int) $this->data['result']->id,
       (int) $this->data['result']->id_company
     );
+
+    $this->data['faturas_count'] = (int) $contagem['recorrencia'];
+    $this->data['avulsas_count'] = (int) $contagem['avulsa'];
 
     // As faturas do contrato vivem na aba Faturas, carregadas por AJAX e
     // paginadas (Contratos::json_postfaturas). Traziam-se todas aqui, sem
     // limite: um contrato mensal antigo carregava dezenas de linhas em toda
     // abertura da tela, para uma tabela que estava fora da dobra.
     //
-    // As cobranças avulsas vêm direto: são poucas por contrato (uma venda
-    // pontual de cada vez), e o bloco fica ao lado do histórico de reajustes,
-    // que segue a mesma regra.
+    // O `charge_model` é carregado pela CONSTANTE `MAX_PARCELAS` logo abaixo,
+    // e não mais pela listagem de cobranças: a tabela "Cobranças avulsas"
+    // saiu do bloco de faturamento. As avulsas passaram a ser vistas pelas
+    // FATURAS que geraram, na aba Faturas, distinguidas pela coluna Tipo —
+    // a mesma informação em dois lugares fazia a tela repetir a si mesma.
     $this->load->model('charge_model');
-    $this->data['charges'] = $this->charge_model->listarPorContrato($id, (int) $this->getCurrentCompanyId());
 
     // Teto de parcelas: no ciclo, o número de meses (parcela que passa disso
     // invade a competência seguinte); na avulsa, o limite comercial do model.
@@ -651,6 +658,11 @@ class Contratos extends MY_Controller
     $id = (int) $this->input->post('id');
     $this->carregarContratoDaTabela($id);
 
+    // Uma avulsa pode ter até 24 parcelas, e cada uma agora derruba o boleto
+    // no banco antes de ser cancelada — com o espaçamento do rate limit, isso
+    // passa do `max_execution_time` padrão.
+    @set_time_limit(0);
+
     $this->load->model('charge_model');
 
     $resultado = $this->charge_model->cancelar(
@@ -659,7 +671,14 @@ class Contratos extends MY_Controller
       (int) $this->session->userdata('user')->id
     );
 
-    $this->session->set_flashdata($resultado['success'] ? 'success' : 'warning', $resultado['message']);
+    // `textoParaFlash` é obrigatório: a mensagem de falha carrega a resposta do
+    // BANCO, e o `header.php` injeta o flashdata dentro de uma string JS entre
+    // aspas duplas sem escapar — uma aspa vinda de lá quebraria o alerta
+    // justamente no caso em que ele importa.
+    $this->session->set_flashdata(
+      $resultado['success'] ? 'success' : 'warning',
+      $this->textoParaFlash($resultado['message'])
+    );
     redirect(base_url('contratos/info?id=' . $id));
   }
 
@@ -780,6 +799,75 @@ class Contratos extends MY_Controller
    *
    * O id do POST é revalidado no servidor (`Servico/Obter`) antes de gravar.
    */
+  /**
+   * Lista as categorias financeiras de RECEITA do ERP.
+   *
+   * Leitura pura, sob demanda: o ERP devolve 429 em poucas chamadas seguidas,
+   * e o nome da categoria fica gravado junto do id justamente para a tela não
+   * precisar ir à rede para mostrar o vínculo.
+   */
+  public function json_postcategoriasbc()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    @set_time_limit(0);
+
+    $this->load->model('bomcontrole_model');
+    $resultado = $this->bomcontrole_model->buscarCategoriasFinanceiras(
+      (int) $this->getCurrentCompanyId()
+    );
+
+    echo json_encode([
+      'success' => (bool) $resultado['success'],
+      'return' => (bool) $resultado['success'],
+      'message' => $resultado['message'],
+      'data' => $resultado['data'],
+      'errors' => $resultado['success'] ? [] : ['bomcontrole' => $resultado['message']],
+    ]);
+  }
+
+  /**
+   * Vincula a categoria financeira ao contrato.
+   *
+   * O escopo do tenant vem do `getCurrentCompanyId()`, nunca do POST — o
+   * model revalida o id contra a listagem daquele tenant.
+   */
+  public function json_postvincularcategoriabc()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $id = (int) $this->input->post('id');
+    if ($id <= 0) {
+      echo json_encode($this->jsonErro('ID inválido.', ['id' => 'ID inválido.']));
+      return;
+    }
+
+    @set_time_limit(0);
+
+    $this->load->model('bomcontrole_model');
+
+    $resultado = ((string) $this->input->post('acao') === 'desvincular')
+      ? $this->bomcontrole_model->desvincularCategoria(
+          $id,
+          (int) $this->getCurrentCompanyId(),
+          (int) $this->session->userdata('user')->id
+        )
+      : $this->bomcontrole_model->vincularCategoria(
+          $id,
+          (int) $this->getCurrentCompanyId(),
+          (int) $this->input->post('id_categoria'),
+          (int) $this->session->userdata('user')->id
+        );
+
+    echo json_encode([
+      'success' => (bool) $resultado['success'],
+      'return' => (bool) $resultado['success'],
+      'message' => $resultado['message'],
+      'data' => $resultado['data'],
+      'errors' => $resultado['success'] ? [] : ['bomcontrole' => $resultado['message']],
+    ]);
+  }
+
   public function json_postvincularservicobc()
   {
     header('Content-Type: application/json; charset=utf-8');
@@ -1941,6 +2029,16 @@ class Contratos extends MY_Controller
       return;
     }
 
+    // A confirmação vai por FLASHDATA, não no corpo do JSON: a tela recarrega
+    // logo em seguida (a cota alterada muda a coluna de uso), e um toast
+    // disparado antes do reload morre com ele — o sintoma é a alteração dar
+    // certo e a tela não dizer nada. Mesma regra das ações de fatura.
+    //
+    // `textoParaFlash()` é obrigatório: o header injeta a mensagem dentro de
+    // uma string JS entre aspas duplas SEM escapar, e aqui o texto carrega o
+    // nome da conta, que vem do painel.
+    $this->session->set_flashdata('success', $this->textoParaFlash($resultado['message']));
+
     echo json_encode([
       'success' => TRUE,
       'return' => TRUE,
@@ -2647,12 +2745,20 @@ class Contratos extends MY_Controller
       return;
     }
 
+    // A origem separa as duas abas: Faturas mostra a RECORRÊNCIA e "Faturas
+    // avulsas" mostra as avulsas. Valor desconhecido no POST não vira "todas"
+    // — o model devolve NULL e o endpoint responde erro.
+    $origem = (string) $this->input->post('origem');
+    if ($origem === '') $origem = 'recorrencia';
+
     $this->load->model('invoice_model');
     $pagina = $this->invoice_model->listarPorEscopo(
       'contrato',
       $id,
       (int) $this->getCurrentCompanyId(),
-      (int) $this->input->post('pagina')
+      (int) $this->input->post('pagina'),
+      Invoice_model::PER_PAGE_ABA,
+      $origem
     );
 
     if ($pagina === NULL) {

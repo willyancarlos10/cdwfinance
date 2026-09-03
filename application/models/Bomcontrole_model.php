@@ -623,8 +623,12 @@ class Bomcontrole_model extends CI_Model
      */
     private function logarErroServico($idCompany, $operacao, $mensagem)
     {
+        // O rótulo é a OPERAÇÃO, e não um módulo fixo: o helper já servia ao
+        // catálogo de serviços, ao IdEmpresa e à nota fiscal, e agora ao
+        // contas a receber — a linha dizia 'Catalogo de servicos' em todos,
+        // o que atrapalha justamente quem vai grepar o log atrás de um caso.
         log_message('error', sprintf(
-            '[BOMCONTROLE] Catalogo de servicos — empresa=%d operacao=%s: %s',
+            '[BOMCONTROLE] empresa=%d operacao=%s: %s',
             (int) $idCompany,
             (string) $operacao,
             (string) $mensagem
@@ -2346,6 +2350,603 @@ class Bomcontrole_model extends CI_Model
     private function respostaNf($success, $message, array $data = [])
     {
         return ['success' => (bool) $success, 'message' => (string) $message, 'data' => $data];
+    }
+
+    // =====================================================================
+    // ETAPA J — CONTA A RECEBER NO ERP QUANDO A COBRANÇA É LIQUIDADA
+    //
+    // O dinheiro cai na conta e alguém precisa conciliá-lo, no Bom Controle,
+    // contra um título. Para quem emite nota esse título já existe — a venda
+    // da etapa E cria a parcela no financeiro, e é por isso que aquela rotina
+    // termina no `Fatura/EfeturarPagamento`. Para quem NÃO emite nota não
+    // existe nada, e o crédito chega sem contrapartida. É esse buraco que
+    // estes métodos fecham, e só ele.
+    // =====================================================================
+
+    /** Na fila, esperando o cron. */
+    const AR_PENDENTE = 'pendente';
+
+    /** Título criado no ERP. Terminal — com GUID gravado, não se cria de novo. */
+    const AR_CRIADO = 'criado';
+
+    /** Desistiu: dado inválido, configuração faltando ou teto de tentativas. */
+    const AR_FALHA = 'falha';
+
+    /**
+     * Teto de tentativas. Sem ele a fatura giraria na fila para sempre.
+     */
+    const AR_MAX_TENTATIVAS = 5;
+
+    /**
+     * Faturas por rodada. Mais baixo que o da nota porque é UMA chamada por
+     * fatura (contra três da nota), então o gargalo aqui é o rate limit e não
+     * o tempo.
+     */
+    const AR_MAX_POR_RODADA = 30;
+
+    /**
+     * Espaçamento entre chamadas. O ERP devolve 429 em ~12 seguidas.
+     */
+    const AR_ESPACAMENTO_MICROSSEGUNDOS = 1200000;
+
+    /**
+     * Coloca a fatura na fila do contas a receber. **Ponto único da decisão.**
+     *
+     * SÓ `nao_emitir` ENTRA, e essa é a regra inteira desta etapa.
+     *
+     * Quem emite nota já tem título no ERP: o `CriarVendaProdutoServico` cria
+     * a venda **e as parcelas do financeiro** — tanto que a etapa E precisa
+     * dar baixa nelas para o BC não acumular recebível fantasma. Criar aqui um
+     * segundo título faria a mesma fatura contar duas vezes na receita do ERP,
+     * e um erro desses só aparece no fechamento do mês.
+     *
+     * Os dois erros não custam o mesmo, e é isso que fixa o default: título a
+     * MENOS aparece na conciliação como crédito órfão e se lança à mão; título
+     * a MAIS infla a receita em silêncio.
+     *
+     * Só entra fatura **paga** — o título representa dinheiro que entrou.
+     *
+     * @param  int $idInvoice
+     * @return bool entrou na fila?
+     */
+    public function enfileirarRecebimento($idInvoice)
+    {
+        $fatura = $this->global_model->getFieldsWhereSingle_off(
+            'crm_invoices',
+            'id, status, invoice_policy, receivable_status',
+            ['id' => (int) $idInvoice],
+            TRUE
+        );
+
+        if (empty($fatura)) return FALSE;
+
+        // Já na fila, já criado ou já desistido: reenfileirar zeraria o
+        // histórico de tentativas e, no pior caso, criaria um segundo título.
+        if ((string) $fatura->receivable_status !== '') return FALSE;
+
+        if ((string) $fatura->status !== 'paga') return FALSE;
+
+        if ((string) $fatura->invoice_policy !== 'nao_emitir') return FALSE;
+
+        $this->global_model->edit('crm_invoices', [
+            'receivable_status' => self::AR_PENDENTE,
+            'receivable_attempts' => 0,
+            'receivable_last_error' => NULL,
+        ], 'id', (int) $idInvoice);
+
+        return TRUE;
+    }
+
+    /**
+     * A fila: faturas esperando o título, dentro do teto de tentativas.
+     *
+     * Não há tabela de fila — `receivable_status` já é o estado, do mesmo
+     * jeito que `psp_charge_id` vazio é a fila de registro da cobrança.
+     *
+     * @param  int $limite
+     * @return array linhas com id e id_company
+     */
+    public function filaRecebimentos($limite = self::AR_MAX_POR_RODADA)
+    {
+        $limite = max(1, (int) $limite);
+
+        $consulta = $this->db->query(
+            "SELECT `id`, `id_company`
+               FROM `crm_invoices`
+              WHERE `receivable_status` = ?
+                AND `receivable_attempts` < ?
+              ORDER BY `id` ASC
+              LIMIT " . $limite,
+            [self::AR_PENDENTE, self::AR_MAX_TENTATIVAS]
+        );
+
+        return ($consulta === FALSE) ? [] : $consulta->result();
+    }
+
+    /**
+     * Cria o título de UMA fatura no financeiro do ERP.
+     *
+     * ⚠️ **ESCRITA no ERP.** Uma chamada só, mas o cuidado é o mesmo da nota:
+     * o GUID devolvido é gravado **antes de qualquer outra coisa**, porque
+     * `bomcontrole_movement_id` preenchido é o que significa "já criado". Uma
+     * falha de rede depois do POST, sem essa gravação, faria a retentativa
+     * criar um segundo título — e não há endpoint que procure recebimento por
+     * `NumeroDocumento` para desfazer o engano automaticamente.
+     *
+     * @param  int $idInvoice
+     * @param  int $idCompany
+     * @param  int $idUser
+     * @return array
+     */
+    public function criarRecebimento($idInvoice, $idCompany, $idUser)
+    {
+        $fatura = $this->global_model->getWhere_off('crm_invoices', [
+            'id' => (int) $idInvoice,
+            'id_company' => (int) $idCompany,
+        ], TRUE);
+
+        if (empty($fatura)) {
+            return $this->respostaNf(FALSE, 'Fatura não encontrada.');
+        }
+
+        if ((string) $fatura->receivable_status !== self::AR_PENDENTE) {
+            return $this->respostaNf(FALSE, 'Esta fatura não está na fila de contas a receber.');
+        }
+
+        // Defesa em profundidade: a guarda real é o `enfileirarRecebimento()`,
+        // mas quem chegar aqui por outro caminho não pode dobrar a receita.
+        if ((string) $fatura->invoice_policy !== 'nao_emitir') {
+            return $this->falharRecebimento($fatura, 'Este contrato emite nota fiscal — o título já é criado pela venda, e um segundo dobraria a receita no ERP.', TRUE, $idUser);
+        }
+
+        if (!empty($fatura->bomcontrole_movement_id)) {
+            return $this->respostaNf(FALSE, 'Esta fatura já tem título no Bom Controle.');
+        }
+
+        // A CONTA é do TENANT (a conta bancária onde o dinheiro entra) e a
+        // CATEGORIA é do CONTRATO (como aquela receita é classificada) — ver o
+        // docblock da 046 para o porquê de não morarem no mesmo lugar.
+        $empresa = $this->global_model->getFieldsWhereSingle_off(
+            'crm_companies',
+            'bomcontrole_company_id, bomcontrole_account_id',
+            ['id' => (int) $idCompany],
+            TRUE
+        );
+
+        // As guardas de configuração rodam ANTES de qualquer chamada: gastar
+        // requisição para descobrir que falta cadastro é desperdício, e o
+        // motivo precisa chegar à tela para alguém resolver.
+        if (empty($empresa) || (int) $empresa->bomcontrole_account_id <= 0) {
+            return $this->falharRecebimento($fatura, 'A empresa não tem conta financeira do Bom Controle definida. Resolva em Empresas › Bom Controle.', TRUE, $idUser);
+        }
+
+        $contrato = $this->global_model->getFieldsWhereSingle_off(
+            'crm_contracts',
+            'id, bomcontrole_category_id',
+            ['id' => (int) $fatura->id_contract],
+            TRUE
+        );
+
+        // NÃO há padrão por tenant, de propósito: um default silencioso jogaria
+        // a receita deste contrato numa classificação errada, e isso só
+        // apareceria no fechamento do mês. Sem categoria, recusa e diz por quê
+        // — mesmo comportamento do `bomcontrole_service_id` na emissão da nota.
+        if (empty($contrato) || (int) $contrato->bomcontrole_category_id <= 0) {
+            return $this->falharRecebimento($fatura, 'O contrato não tem categoria financeira do Bom Controle vinculada — sem ela o título não teria como classificar a receita.', TRUE, $idUser);
+        }
+
+        $cliente = $this->global_model->getWhere_off('crm_customers', ['id' => (int) $fatura->id_customer], TRUE);
+
+        if (empty($cliente) || (int) $cliente->bomcontrole_customer_id <= 0) {
+            return $this->falharRecebimento($fatura, 'O cliente ainda não foi sincronizado com o Bom Controle.', TRUE, $idUser);
+        }
+
+        $config = $this->getConfig($idCompany);
+        if (!$config['success']) {
+            return $this->falharRecebimento($fatura, $config['message'], FALSE, $idUser);
+        }
+
+        $payload = $this->montarPayloadRecebimento($fatura, $cliente, $empresa, $contrato);
+
+        $sessao = sessao_suspender();
+        try {
+            $r = $this->client()->criarOutroRecebimento($config['config'], $payload);
+        } finally {
+            sessao_retomar($sessao);
+        }
+
+        if (empty($r['success'])) {
+            return $this->falharRecebimento($fatura, 'Criar recebimento: ' . $r['message'], $this->nfDefinitivo($r), $idUser);
+        }
+
+        $dados = is_array($r['data']) ? $r['data'] : [];
+        $idMovimentacao = trim((string) $this->campo($dados, ['IdMovimentacaoFinanceira'], ''));
+        $idParcela = trim((string) $this->campo($dados, ['IdMovimentacaoFinanceiraParcela'], ''));
+
+        if ($idMovimentacao === '') {
+            // O ERP aceitou mas não disse qual título criou. NÃO é retentável:
+            // repetir criaria um segundo, e o primeiro existe em algum lugar.
+            // O `NumeroDocumento` é o que permite achá-lo à mão.
+            return $this->falharRecebimento(
+                $fatura,
+                'O Bom Controle aceitou o recebimento mas não devolveu o Id. Procure o título pelo número de documento ' . (int) $fatura->id . ' antes de tentar de novo.',
+                TRUE,
+                $idUser
+            );
+        }
+
+        $this->global_model->edit('crm_invoices', [
+            'receivable_status' => self::AR_CRIADO,
+            'receivable_last_error' => NULL,
+            'receivable_created_at' => date('Y-m-d H:i:s'),
+            'bomcontrole_movement_id' => mb_substr($idMovimentacao, 0, 36),
+            'bomcontrole_installment_id' => mb_substr($idParcela, 0, 36),
+            'modified' => date('Y-m-d H:i:s'),
+            'modified_by' => (int) $idUser,
+        ], 'id', (int) $fatura->id);
+
+        return $this->respostaNf(TRUE, 'Conta a receber criada no Bom Controle.', [
+            'movimentacao' => $idMovimentacao,
+            'parcela' => $idParcela,
+        ]);
+    }
+
+    /**
+     * O corpo do `CriarOutroRecebimento`.
+     *
+     * O QUE IDENTIFICA A FATURA DO LADO DE LÁ:
+     *  - `NumeroDocumento` recebe o `crm_invoices.id`. O campo é documentado
+     *    como Inteiro e volta no `Financeiro/Pesquisar` — é o que permite achar
+     *    o título quando o GUID se perde;
+     *  - `Observacao` repete o id em texto, que é o que o operador enxerga na
+     *    tela do ERP. Sem ele o título seria "um recebimento de R$ X" no meio
+     *    de dezenas iguais.
+     *
+     * O VALOR É O QUE ENTROU, não o que foi cobrado: o cliente pode ter pago
+     * com juros ou desconto, e o título precisa bater com a linha do extrato
+     * bancário — que é justamente o que vai ser conciliado contra ele. Mesma
+     * regra do `aplicarBaixa()`.
+     *
+     * `FormaPagamento.Boleto` é **OMITIDO**, como no `CriarVendaProdutoServico`
+     * e pelo mesmo motivo: a doc diz "informar apenas quando houver emissão", e
+     * informá-lo mandaria o ERP emitir uma segunda cobrança ao cliente. O que
+     * se usa é `Outros.Nome`, que apenas ROTULA a forma de pagamento.
+     *
+     * `QuantidadeParcelas` é sempre 1: o parcelamento já aconteceu aqui, e cada
+     * parcela nossa é uma fatura própria com o seu próprio título.
+     *
+     * @param  object $fatura
+     * @param  object $cliente
+     * @param  object $empresa  traz a CONTA (do tenant)
+     * @param  object $contrato traz a CATEGORIA (do contrato)
+     * @return array
+     */
+    private function montarPayloadRecebimento($fatura, $cliente, $empresa, $contrato)
+    {
+        $valor = (float) $fatura->paid_amount;
+        if ($valor <= 0) $valor = (float) $fatura->value;
+
+        $vencimento = $this->dataIso($fatura->due_date);
+        if ($vencimento === NULL) $vencimento = date('Y-m-d');
+
+        $competencia = $this->dataIso($fatura->competence);
+        if ($competencia === NULL) $competencia = $vencimento;
+
+        $observacao = 'Fatura ' . (int) $fatura->id . ' — CDW Finance';
+        if (!empty($fatura->description)) {
+            $observacao .= ' — ' . (string) $fatura->description;
+        }
+
+        return [
+            'IdCliente' => (int) $cliente->bomcontrole_customer_id,
+            'IdContaFinanceira' => (int) $empresa->bomcontrole_account_id,
+            'IdCategoriaFinanceira' => (int) $contrato->bomcontrole_category_id,
+            'FormaPagamento' => [
+                'Outros' => ['Nome' => $this->formaPagamentoBomControle($fatura->paid_method)],
+            ],
+            'PrimeiroVencimento' => $vencimento . ' 00:00:00',
+            'DataCompetencia' => $competencia . ' 00:00:00',
+            'QuantidadeParcelas' => 1,
+            'Valor' => round($valor, 2),
+            'NumeroDocumento' => (int) $fatura->id,
+            'Observacao' => mb_substr($observacao, 0, 250),
+            'ValorDefinitivo' => TRUE,
+        ];
+    }
+
+    /**
+     * Traduz a forma de pagamento do PSP para o vocabulário do ERP.
+     *
+     * A lista aceita na ESCRITA é fechada e **não tem PIX** (Dinheiro,
+     * Deposito, Cheque, TransferenciaBancaria, CartaoCredito, CartaoDebito,
+     * BoletoBancario, DescontoEmFolha, Outros, DebitoConta). PIX vira
+     * `TransferenciaBancaria`, que é o que ele é; valor desconhecido cai em
+     * `Outros` em vez de chutar — rótulo errado no financeiro do ERP é pior
+     * que rótulo genérico.
+     *
+     * @param  string $metodo
+     * @return string
+     */
+    private function formaPagamentoBomControle($metodo)
+    {
+        $metodo = strtolower(trim((string) $metodo));
+
+        if ($metodo === '') return 'BoletoBancario';
+        if (strpos($metodo, 'boleto') !== FALSE) return 'BoletoBancario';
+        if (strpos($metodo, 'pix') !== FALSE) return 'TransferenciaBancaria';
+
+        return 'Outros';
+    }
+
+    /**
+     * Registra a falha e decide se ainda vale tentar.
+     *
+     * @param  object $fatura
+     * @param  string $mensagem
+     * @param  bool   $definitivo
+     * @param  int    $idUser
+     * @return array
+     */
+    private function falharRecebimento($fatura, $mensagem, $definitivo, $idUser)
+    {
+        $tentativas = (int) $fatura->receivable_attempts + 1;
+        $vira = $definitivo || $tentativas >= self::AR_MAX_TENTATIVAS;
+
+        $this->global_model->edit('crm_invoices', [
+            'receivable_status' => $vira ? self::AR_FALHA : self::AR_PENDENTE,
+            'receivable_attempts' => $tentativas,
+            'receivable_last_error' => mb_substr((string) $mensagem, 0, 255),
+            'modified' => date('Y-m-d H:i:s'),
+            'modified_by' => (int) $idUser,
+        ], 'id', (int) $fatura->id);
+
+        $this->logarErroServico((int) $fatura->id_company, 'criarRecebimento fatura=' . (int) $fatura->id, (string) $mensagem);
+
+        return $this->respostaNf(FALSE, $mensagem, ['definitivo' => $vira, 'tentativas' => $tentativas]);
+    }
+
+    /**
+     * As contas financeiras do tenant no ERP, para o select da tela.
+     *
+     * Leitura pura. Exige o `bomcontrole_company_id` (039) porque o endpoint
+     * pede `idEmpresa` — e sem ele não há o que listar.
+     *
+     * @param  int $idCompany
+     * @return array
+     */
+    public function buscarContasFinanceiras($idCompany)
+    {
+        return $this->listarCatalogoFinanceiro($idCompany, 'contas');
+    }
+
+    /**
+     * As categorias financeiras de RECEITA do tenant no ERP.
+     *
+     * @param  int $idCompany
+     * @return array
+     */
+    public function buscarCategoriasFinanceiras($idCompany)
+    {
+        return $this->listarCatalogoFinanceiro($idCompany, 'categorias');
+    }
+
+    /**
+     * As duas listagens têm o mesmo esqueleto — config, rede com a sessão
+     * suspensa, normalização do envelope e log da falha. Escrevê-las duas
+     * vezes faria uma divergir da outra na primeira correção.
+     *
+     * @param  int    $idCompany
+     * @param  string $qual 'contas' | 'categorias'
+     * @return array
+     */
+    private function listarCatalogoFinanceiro($idCompany, $qual)
+    {
+        $config = $this->getConfig($idCompany);
+        if (!$config['success']) {
+            return $this->respostaNf(FALSE, $config['message']);
+        }
+
+        if ($qual === 'contas') {
+            $empresa = $this->global_model->getFieldsWhereSingle_off(
+                'crm_companies',
+                'bomcontrole_company_id',
+                ['id' => (int) $idCompany],
+                TRUE
+            );
+
+            $idEmpresaBc = empty($empresa) ? 0 : (int) $empresa->bomcontrole_company_id;
+
+            if ($idEmpresaBc <= 0) {
+                return $this->respostaNf(FALSE, 'Resolva antes o Id da empresa no Bom Controle — a listagem de contas exige o IdEmpresa.');
+            }
+        }
+
+        $sessao = sessao_suspender();
+        try {
+            $r = ($qual === 'contas')
+                ? $this->client()->pesquisarContasFinanceiras($config['config'], $idEmpresaBc)
+                : $this->client()->pesquisarCategoriasFinanceiras($config['config'], '');
+        } finally {
+            sessao_retomar($sessao);
+        }
+
+        if (empty($r['success'])) {
+            $this->logarErroServico($idCompany, 'listar ' . $qual, (string) $r['message']);
+            return $this->respostaNf(FALSE, (string) $r['message']);
+        }
+
+        $dados = $r['data'];
+        $itens = (is_array($dados) && isset($dados['Itens']) && is_array($dados['Itens']))
+            ? $dados['Itens']
+            : (array) $dados;
+
+        $lista = [];
+
+        foreach ($itens as $item) {
+            $item = (array) $item;
+            $id = (int) $this->campo($item, ['Id'], 0);
+            if ($id <= 0) continue;
+
+            $linha = [
+                'id' => $id,
+                'nome' => (string) $this->campo($item, ['Nome'], ''),
+            ];
+
+            if ($qual === 'contas') {
+                $linha['tipo'] = (string) $this->campo($item, ['NomeTipo'], '');
+                $linha['banco'] = (string) $this->campo($item, ['NomeBanco'], '');
+            } else {
+                // O endpoint aceita `despesa=false`, mas conferir aqui também
+                // custa nada e impede que uma categoria de DESPESA entre no
+                // select — ela inverteria o sinal no fluxo de caixa do ERP.
+                if (!empty($item['Despesa'])) continue;
+            }
+
+            $lista[] = $linha;
+        }
+
+        if (empty($lista)) {
+            return $this->respostaNf(FALSE, ($qual === 'contas')
+                ? 'Nenhuma conta financeira que aceite recebimento foi encontrada nesta empresa do Bom Controle.'
+                : 'Nenhuma categoria financeira de receita foi encontrada no Bom Controle.');
+        }
+
+        return $this->respostaNf(TRUE, '', ['itens' => $lista]);
+    }
+
+    /**
+     * Grava a CONTA financeira do tenant (onde o dinheiro entra).
+     *
+     * A categoria NÃO passa por aqui — ela é do CONTRATO, e vive em
+     * `vincularCategoria()`. Ver o docblock da 046 para o porquê da separação.
+     *
+     * O id vem do POST, mas o **nome é lido da listagem do ERP**, nunca do
+     * navegador — mesma regra do `vincularServico()`: o id é a verdade e o
+     * nome é retrato. Id que não está na listagem é recusado.
+     *
+     * @param  int $idCompany
+     * @param  int $idConta
+     * @param  int $idUser
+     * @return array
+     */
+    public function salvarContaFinanceira($idCompany, $idConta, $idUser)
+    {
+        if ((int) $idConta <= 0) {
+            return $this->respostaNf(FALSE, 'Escolha a conta financeira.');
+        }
+
+        $contas = $this->buscarContasFinanceiras($idCompany);
+        if (!$contas['success']) return $contas;
+
+        $escolhida = $this->acharNoCatalogo($contas['data']['itens'], (int) $idConta);
+        if ($escolhida === NULL) {
+            return $this->respostaNf(FALSE, 'Conta financeira não encontrada no Bom Controle.');
+        }
+
+        $this->global_model->edit('crm_companies', [
+            'bomcontrole_account_id' => (int) $idConta,
+            'bomcontrole_account_name' => mb_substr($escolhida['nome'], 0, 120),
+            'modified' => date('Y-m-d H:i:s'),
+            'modified_by' => (int) $idUser,
+        ], 'id', (int) $idCompany);
+
+        return $this->respostaNf(TRUE, 'Conta financeira do Bom Controle atualizada.');
+    }
+
+    /**
+     * Vincula a CATEGORIA financeira ao CONTRATO.
+     *
+     * Espelha o `vincularServico()`, e pelo mesmo motivo: o id vem do POST, o
+     * **nome é lido do ERP** e o vínculo é recusado se o id não estiver na
+     * listagem daquele tenant — id forjado no POST não atravessa.
+     *
+     * @param  int $idContract
+     * @param  int $idCompany
+     * @param  int $idCategoria
+     * @param  int $idUser
+     * @return array
+     */
+    public function vincularCategoria($idContract, $idCompany, $idCategoria, $idUser)
+    {
+        $contrato = $this->global_model->getWhere_off('crm_contracts', [
+            'id' => (int) $idContract,
+            'id_company' => (int) $idCompany,
+        ], TRUE);
+
+        if (empty($contrato)) {
+            return $this->respostaNf(FALSE, 'Contrato não encontrado.');
+        }
+
+        if ((int) $idCategoria <= 0) {
+            return $this->respostaNf(FALSE, 'Escolha uma categoria.');
+        }
+
+        $categorias = $this->buscarCategoriasFinanceiras($idCompany);
+        if (!$categorias['success']) return $categorias;
+
+        $escolhida = $this->acharNoCatalogo($categorias['data']['itens'], (int) $idCategoria);
+        if ($escolhida === NULL) {
+            return $this->respostaNf(FALSE, 'Categoria financeira não encontrada no Bom Controle.');
+        }
+
+        $this->global_model->edit('crm_contracts', [
+            'bomcontrole_category_id' => (int) $idCategoria,
+            'bomcontrole_category_name' => mb_substr($escolhida['nome'], 0, 120),
+            'modified' => date('Y-m-d H:i:s'),
+            'modified_by' => (int) $idUser,
+        ], 'id', (int) $idContract);
+
+        return $this->respostaNf(TRUE, 'Categoria vinculada.', [
+            'id' => (int) $idCategoria,
+            'nome' => $escolhida['nome'],
+        ]);
+    }
+
+    /**
+     * Desfaz o vínculo da categoria.
+     *
+     * O contrato volta a RECUSAR a criação do título — que é o comportamento
+     * correto, e não efeito colateral: sem categoria, a receita iria para uma
+     * classificação errada.
+     *
+     * @param  int $idContract
+     * @param  int $idCompany
+     * @param  int $idUser
+     * @return array
+     */
+    public function desvincularCategoria($idContract, $idCompany, $idUser)
+    {
+        $contrato = $this->global_model->getWhere_off('crm_contracts', [
+            'id' => (int) $idContract,
+            'id_company' => (int) $idCompany,
+        ], TRUE);
+
+        if (empty($contrato)) {
+            return $this->respostaNf(FALSE, 'Contrato não encontrado.');
+        }
+
+        $this->global_model->edit('crm_contracts', [
+            'bomcontrole_category_id' => NULL,
+            'bomcontrole_category_name' => NULL,
+            'modified' => date('Y-m-d H:i:s'),
+            'modified_by' => (int) $idUser,
+        ], 'id', (int) $idContract);
+
+        return $this->respostaNf(TRUE, 'Categoria desvinculada.');
+    }
+
+    /**
+     * @param  array $itens
+     * @param  int   $id
+     * @return array|null
+     */
+    private function acharNoCatalogo(array $itens, $id)
+    {
+        foreach ($itens as $item) {
+            if ((int) $item['id'] === (int) $id) return $item;
+        }
+
+        return NULL;
     }
 
 }

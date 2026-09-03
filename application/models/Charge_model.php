@@ -180,20 +180,40 @@ class Charge_model extends CI_Model
     }
 
     /**
-     * Cancela a cobrança e as parcelas ainda ABERTAS.
+     * Cancela a cobrança avulsa e as parcelas ainda em aberto.
      *
-     * As pagas ficam como estão: o dinheiro entrou, e reescrever a situação
-     * delas apagaria o registro de um pagamento que existiu. As canceladas já
-     * estão no estado final.
+     * ⚠️ **CANCELAR A PARCELA É CANCELAR O BOLETO PRIMEIRO.** Até 30/08/2026
+     * este método marcava as parcelas como canceladas com um `UPDATE` direto e
+     * nunca tocava no PSP — deixando boletos vivos e perfeitamente pagáveis no
+     * banco enquanto a fatura constava cancelada aqui. É exatamente o buraco
+     * que o cancelamento de fatura existe para fechar: o cliente paga, o
+     * dinheiro entra, e do lado de cá não há nada a conciliar.
      *
-     * A cobrança nunca é apagada, só cancelada — é registro financeiro, mesma
-     * regra das FKs RESTRICT de `crm_invoices`. É também o que sustenta a
-     * sentinela `id_charge = 0` viver sem FK.
+     * A regra é a MESMA do `Faturas::derrubarCobranca()`, e por isso passa pelo
+     * mesmo `Psp_model::cancelarCobranca()` — que decide sozinho o que fazer
+     * quando não há cobrança registrada (sucesso, sem nada a cancelar) e é
+     * quem apaga boleto, PIX e `psp_charge_id` da linha.
+     *
+     * **A ORDEM É POR PARCELA, e é o que torna a repetição segura**: cada uma
+     * só é marcada como cancelada DEPOIS de o banco confirmar a derrubada do
+     * boleto. Falhando uma, as anteriores continuam corretamente canceladas
+     * (boleto fora, fatura fechada), a que falhou continua **em aberto com o
+     * boleto de pé** — que é a verdade — e a COBRANÇA não é marcada como
+     * cancelada. Repetir a operação retoma exatamente de onde parou, porque o
+     * laço só olha para as parcelas `aberta`.
+     *
+     * **Não há mais transação em volta do laço**, de propósito: ela agora
+     * envolveria chamadas de rede, segurando lock de banco por dezenas de
+     * segundos. A atomicidade que importa é a de cada parcela, e essa é
+     * garantida pela ordem.
+     *
+     * O espaçamento entre chamadas existe porque o rate limit do Inter estoura
+     * em ~6 seguidas, e uma avulsa pode ter até `MAX_PARCELAS` (24).
      *
      * @param  int $idCharge
      * @param  int $idCompany
      * @param  int $idUser
-     * @return array success, message, data => ['canceladas']
+     * @return array
      */
     public function cancelar($idCharge, $idCompany, $idUser)
     {
@@ -210,9 +230,62 @@ class Charge_model extends CI_Model
             return $this->resposta(FALSE, 'Esta cobrança já está cancelada.');
         }
 
-        $agora = date('Y-m-d H:i:s');
+        $abertas = $this->db->query(
+            "SELECT id FROM crm_invoices
+              WHERE id_charge = ? AND id_company = ? AND status = 'aberta'
+              ORDER BY installment_number ASC, id ASC",
+            [(int) $cobranca->id, (int) $idCompany]
+        );
 
-        $this->db->trans_begin();
+        $abertas = ($abertas === FALSE) ? [] : $abertas->result();
+
+        $this->load->model('psp_model');
+
+        $agora = date('Y-m-d H:i:s');
+        $canceladas = 0;
+        $boletos = 0;
+        $falhas = [];
+
+        foreach ($abertas as $i => $fatura) {
+            if ($i > 0) usleep(Psp_model::ESPACAMENTO_COBRANCAS_MICROSSEGUNDOS);
+
+            $r = $this->psp_model->cancelarCobranca(
+                (int) $fatura->id,
+                (int) $idCompany,
+                'Cobrança avulsa cancelada no CDW Finance',
+                $idUser
+            );
+
+            if (empty($r['success'])) {
+                // Fica em aberto, com o boleto vivo — que é a verdade. Marcar
+                // como cancelada aqui é justamente o defeito que este método
+                // deixou de ter.
+                $falhas[] = '#' . (int) $fatura->id . ': ' . $r['message'];
+                continue;
+            }
+
+            if (!empty($r['data']['cancelou'])) $boletos++;
+
+            $this->global_model->edit('crm_invoices', [
+                'status' => 'cancelada',
+                'modified' => $agora,
+                'modified_by' => (int) $idUser,
+            ], 'id', (int) $fatura->id);
+
+            $canceladas++;
+        }
+
+        if (!empty($falhas)) {
+            return $this->resposta(FALSE, sprintf(
+                'A cobrança NÃO foi cancelada: %d de %d parcela(s) foram canceladas e %d falhou(ram) no banco — %s'
+                . ' As que falharam continuam EM ABERTO, com o boleto de pé: cancelar só aqui deixaria o cliente conseguindo pagá-lo.'
+                . ' Repita a operação em instantes; ela retoma de onde parou.',
+                $canceladas,
+                count($abertas),
+                count($falhas),
+                implode(' | ', $falhas)
+            ), ['canceladas' => $canceladas, 'falhas' => count($falhas)]);
+        }
 
         $this->global_model->edit('crm_contracts_charges', [
             'status' => 'cancelada',
@@ -220,25 +293,13 @@ class Charge_model extends CI_Model
             'modified_by' => (int) $idUser,
         ], 'id', (int) $cobranca->id);
 
-        $this->db->query(
-            "UPDATE crm_invoices
-                SET status = 'cancelada', modified = ?, modified_by = ?
-              WHERE id_charge = ? AND id_company = ? AND status = 'aberta'",
-            [$agora, (int) $idUser, (int) $cobranca->id, (int) $idCompany]
-        );
-
-        $canceladas = (int) $this->db->affected_rows();
-
-        if ($this->db->trans_status() === FALSE) {
-            $this->db->trans_rollback();
-            return $this->resposta(FALSE, 'Falha ao cancelar a cobrança.');
-        }
-
-        $this->db->trans_commit();
-
-        return $this->resposta(TRUE, 'Cobrança cancelada; ' . $canceladas . ' parcela(s) em aberto cancelada(s).', [
-            'canceladas' => $canceladas,
-        ]);
+        // "Cancelei N boletos" é diferente de "não havia boleto nenhum", e a
+        // segunda não deixa dúvida sobre o que o cliente tem em mãos.
+        return $this->resposta(TRUE, sprintf(
+            'Cobrança cancelada; %d parcela(s) em aberto cancelada(s)%s.',
+            $canceladas,
+            $boletos > 0 ? ', ' . $boletos . ' com boleto derrubado no banco' : ' (nenhuma tinha boleto registrado)'
+        ), ['canceladas' => $canceladas, 'boletos' => $boletos]);
     }
 
     /**

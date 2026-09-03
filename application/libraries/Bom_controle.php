@@ -711,6 +711,109 @@ class Bom_controle
     }
 
     /**
+     * GET /integracao/ContaFinanceira/Pesquisar
+     *
+     * As contas financeiras do tenant no ERP — é de uma delas que sai o
+     * `IdContaFinanceira`, obrigatório no `CriarOutroRecebimento`.
+     *
+     * `idEmpresa` é **obrigatório** aqui (diferente do `Empresa/Pesquisar`,
+     * que ignora filtro), e por isso o `bomcontrole_company_id` da 039 é
+     * pré-requisito: sem ele não há como listar conta nenhuma.
+     *
+     * O filtro `permiteRecebimento` existe justamente para não oferecer conta
+     * que só paga — escolher uma delas faria o POST falhar depois, longe daqui.
+     *
+     * @param  array $config
+     * @param  int   $idEmpresaBc
+     * @param  bool  $somenteRecebimento
+     * @return array
+     */
+    public function pesquisarContasFinanceiras(array $config, $idEmpresaBc, $somenteRecebimento = TRUE)
+    {
+        $params = ['idEmpresa' => (int) $idEmpresaBc];
+
+        if ($somenteRecebimento) {
+            $params['permiteRecebimento'] = 'true';
+        }
+
+        return $this->requisitar($config, '/integracao/ContaFinanceira/Pesquisar', $params);
+    }
+
+    /**
+     * GET /integracao/CategoriaFinanceira/PesquisarCategoriasFilhas
+     *
+     * O catálogo de categorias financeiras. `despesa = false` traz só as de
+     * RECEITA — mandar o recebimento para uma categoria de despesa inverteria
+     * o sinal no fluxo de caixa do ERP.
+     *
+     * O nome do endpoint fala em "filhas", mas é a listagem que o BC expõe;
+     * não há um "PesquisarCategorias" simples no collection.
+     *
+     * @param  array  $config
+     * @param  string $textoPesquisa
+     * @return array
+     */
+    public function pesquisarCategoriasFinanceiras(array $config, $textoPesquisa = '')
+    {
+        return $this->requisitar($config, '/integracao/CategoriaFinanceira/PesquisarCategoriasFilhas', [
+            'textoPesquisa' => (string) $textoPesquisa,
+            'despesa' => 'false',
+        ]);
+    }
+
+    /**
+     * POST /integracao/Financeiro/CriarOutroRecebimento
+     *
+     * ⚠️ **ESCRITA.** Cria uma movimentação de recebimento (conta a receber)
+     * no financeiro do ERP. Não emite nota e não emite boleto — é só o título
+     * contra o qual o crédito do extrato bancário vai ser conciliado.
+     *
+     * O objeto `FormaPagamento.Boleto` é **omitido**, pela mesma razão do
+     * `CriarVendaProdutoServico`: informá-lo pede emissão de boleto ao ERP, e
+     * o boleto já existe no PSP. O que se usa é `Outros.Nome`, que apenas
+     * ROTULA a forma de pagamento.
+     *
+     * Devolve `{IdMovimentacaoFinanceira, IdMovimentacaoFinanceiraParcela}` —
+     * os dois são **GUIDs**, apesar de o nome sugerir inteiro.
+     *
+     * Não há endpoint de "procurar recebimento por NumeroDocumento": achar um
+     * título criado por uma tentativa ambígua exige varrer
+     * `Financeiro/Pesquisar` na janela de datas e casar no PHP. Por isso quem
+     * chama tem de gravar o GUID antes de qualquer outra coisa.
+     *
+     * @param  array $config
+     * @param  array $payload
+     * @return array
+     */
+    public function criarOutroRecebimento(array $config, array $payload)
+    {
+        return $this->requisitar(
+            $config,
+            '/integracao/Financeiro/CriarOutroRecebimento',
+            [],
+            'POST',
+            $payload
+        );
+    }
+
+    /**
+     * GET /integracao/Financeiro/Obter
+     *
+     * A parcela pelo GUID — serve para conferir o título criado sem depender
+     * de varredura. Leitura pura.
+     *
+     * @param  array  $config
+     * @param  string $idParcela GUID
+     * @return array
+     */
+    public function obterParcelaFinanceira(array $config, $idParcela)
+    {
+        return $this->requisitar($config, '/integracao/Financeiro/Obter', [
+            'idMovimentacaoFinanceiraParcela' => (string) $idParcela,
+        ]);
+    }
+
+    /**
      * @param  string $mensagem
      * @param  int    $status
      * @return array

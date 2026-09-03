@@ -73,6 +73,7 @@ class Faturas extends MY_Controller
     $this->data['total_results'] = $config['total_rows'];
     $this->data['est_count'] = $config['total_rows'];
     $this->data['situations'] = $this->situations();
+    $this->data['origins'] = $this->origins();
 
     // Catálogo do PSP para o badge de registro e para o modal de troca. Só os
     // provedores com credencial ATIVA entram nas opções — oferecer um sem
@@ -125,8 +126,14 @@ class Faturas extends MY_Controller
       $situacao = isset($avancado['situation']) ? (string) $avancado['situation'] : '';
       if (!array_key_exists($situacao, $this->situations())) $situacao = '';
 
+      // Valor fora da allowlist vira "todas" em vez de entrar no WHERE — o
+      // slug é concatenado na string de $where, não passa por bind.
+      $origem = isset($avancado['origin']) ? (string) $avancado['origin'] : '';
+      if (!array_key_exists($origem, $this->origins())) $origem = '';
+
       $this->session->set_userdata(self::FILTRO_AVANCADO, [
         'situation' => $situacao,
+        'origin' => $origem,
         'vencimento_de' => $this->dataFiltro(isset($avancado['vencimento_de']) ? $avancado['vencimento_de'] : ''),
         'vencimento_ate' => $this->dataFiltro(isset($avancado['vencimento_ate']) ? $avancado['vencimento_ate'] : ''),
       ]);
@@ -147,6 +154,27 @@ class Faturas extends MY_Controller
       'vencida' => 'Vencida',
       'paga' => 'Paga',
       'cancelada' => 'Cancelada',
+    ];
+  }
+
+  /**
+   * De onde a fatura veio: da recorrência do contrato ou de uma cobrança
+   * avulsa.
+   *
+   * O dado já existe em `crm_invoices.id_charge` — **sentinela 0** para a
+   * recorrência, id da cobrança para a avulsa (migration 031) —, então isto é
+   * só o vocabulário da tela e a allowlist do filtro. Não virou coluna
+   * derivada na `crm_invoices_v` porque a condição é trivial (`> 0`) e a view
+   * já expõe o `id_charge`: uma coluna a mais seria paga por toda listagem e
+   * por toda contagem de paginação para não responder nada novo.
+   *
+   * @return array slug => rótulo
+   */
+  private function origins()
+  {
+    return [
+      'recorrencia' => 'Recorrência',
+      'avulsa' => 'Avulsa',
     ];
   }
 
@@ -181,6 +209,17 @@ class Faturas extends MY_Controller
     $situacao = isset($avancado['situation']) ? (string) $avancado['situation'] : '';
     if (array_key_exists($situacao, $this->situations())) {
       $where .= " AND situation = '" . $this->db->escape_str($situacao) . "'";
+    }
+
+    // `id_charge` precisa de `= 0` e `> 0`, e o `Global_model::getFilter()` só
+    // faz `campo = valor` — e descartaria o zero de qualquer forma, porque
+    // pula toda chave de valor vazio e `empty('0')` é TRUE. Por isso vive no
+    // FILTRO_AVANCADO e é traduzido aqui, como a situação e o período.
+    $origem = isset($avancado['origin']) ? (string) $avancado['origin'] : '';
+    if ($origem === 'recorrencia') {
+      $where .= ' AND id_charge = 0';
+    } elseif ($origem === 'avulsa') {
+      $where .= ' AND id_charge > 0';
     }
 
     $de = isset($avancado['vencimento_de']) ? (string) $avancado['vencimento_de'] : '';

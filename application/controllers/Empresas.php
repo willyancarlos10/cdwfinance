@@ -259,6 +259,10 @@ class Empresas extends MY_Controller
     $this->load->library('secret_crypto');
     $this->data['bomcontrole_key_set'] = $this->bomcontrole_model->hasKey((int) $id);
     $this->data['bomcontrole_company_id'] = (int) $this->data['result']->bomcontrole_company_id;
+    $this->data['bomcontrole_account_id'] = (int) $this->data['result']->bomcontrole_account_id;
+    $this->data['bomcontrole_account_name'] = (string) $this->data['result']->bomcontrole_account_name;
+    // A categoria financeira NÃO fica aqui: ela é do CONTRATO, porque
+    // classifica a receita e isso varia por contrato (migration 046).
     $this->data['crypto_ready'] = $this->secret_crypto->isReady();
 
     // Aba PSP: uma seção por provedor da allowlist, para o PSP novo
@@ -466,7 +470,6 @@ class Empresas extends MY_Controller
         'active' => !empty($input['active']),
         'environment' => (string) ($input['environment'] ?? 'sandbox'),
         'client_id' => (string) ($input['client_id'] ?? ''),
-        'conta_corrente' => (string) ($input['conta_corrente'] ?? ''),
         'client_secret' => $secret !== '' ? $secret : NULL, // em branco = manter
       ],
       (int) $this->session->userdata('user')->id
@@ -697,6 +700,58 @@ class Empresas extends MY_Controller
       'errors' => !empty($resultado['success']) ? [] : ['bomcontrole' => (string) $resultado['message']],
     ]);
   }
+
+  /**
+   * Lista as contas financeiras do ERP para o select da tela.
+   *
+   * Leitura pura. A CATEGORIA não sai daqui — ela é do contrato, e a listagem
+   * dela vive em `Contratos::json_postcategoriasbc`.
+   */
+  public function json_postfinanceirobomcontrole()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $idCompany = (int) $this->input->post('id');
+
+    $this->load->model('bomcontrole_model');
+
+    $contas = $this->bomcontrole_model->buscarContasFinanceiras($idCompany);
+    $ok = !empty($contas['success']);
+
+    echo json_encode([
+      'success' => $ok,
+      'return' => $ok,
+      'message' => $ok ? '' : (string) $contas['message'],
+      'data' => ['contas' => $ok ? $contas['data']['itens'] : []],
+      'errors' => $ok ? [] : ['bomcontrole' => (string) $contas['message']],
+    ]);
+  }
+
+  /**
+   * Grava a conta financeira escolhida (onde o dinheiro entra).
+   *
+   * O id vem do POST e o NOME é lido do ERP — nunca do navegador.
+   */
+  public function json_postsalvarfinanceirobomcontrole()
+  {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $this->load->model('bomcontrole_model');
+    $resultado = $this->bomcontrole_model->salvarContaFinanceira(
+      (int) $this->input->post('id'),
+      (int) $this->input->post('id_conta'),
+      (int) $this->session->userdata('user')->id
+    );
+
+    echo json_encode([
+      'success' => !empty($resultado['success']),
+      'return' => !empty($resultado['success']),
+      'message' => (string) $resultado['message'],
+      'data' => isset($resultado['data']) ? $resultado['data'] : NULL,
+      'errors' => !empty($resultado['success']) ? [] : ['bomcontrole' => (string) $resultado['message']],
+    ]);
+  }
+
   public function post_ativarcadastro()
   {
     $this->data['result'] = $this->global_model->getWhere_off('crm_companies', ["id" => $this->input->post('id')], TRUE);

@@ -328,7 +328,7 @@ class Psp_model extends CI_Model
      *
      * @param  int    $idCompany
      * @param  string $psp
-     * @param  array  $dados  ['active','environment','client_id','client_secret'|NULL,'conta_corrente']
+     * @param  array  $dados  ['active','environment','client_id','client_secret'|NULL]
      * @param  int    $idUser
      * @return array success, message
      */
@@ -343,11 +343,10 @@ class Psp_model extends CI_Model
 
         $ambiente = ((string) ($dados['environment'] ?? '')) === 'producao' ? 'producao' : 'sandbox';
 
+        // `extra` existe para configuração específica de provedor. Hoje nenhum
+        // provedor usa: a conta corrente do Inter saiu (sempre a padrão), e a
+        // coluna fica para o próximo PSP que precisar.
         $extra = [];
-        $conta = trim((string) ($dados['conta_corrente'] ?? ''));
-        if ($conta !== '') {
-            $extra['conta_corrente'] = $conta;
-        }
 
         $campos = [
             'active' => !empty($dados['active']) ? 1 : 0,
@@ -1563,6 +1562,17 @@ class Psp_model extends CI_Model
         // aos dois pelo mesmo caminho.
         $this->load->model('bomcontrole_model');
         $this->bomcontrole_model->enfileirarNota((int) $fatura->id, 'baixa');
+
+        // E o CONTAS A RECEBER (etapa J), pelo mesmo motivo de estar aqui: é o
+        // momento em que o pagamento vira fato, e as duas vias — webhook e
+        // conciliação — chegam por este ponto único.
+        //
+        // As duas filas convivem sem se sobrepor porque a política as separa:
+        // quem emite nota já ganha título pela VENDA da etapa E (que por isso
+        // termina dando baixa nele), e quem não emite não ganha nada. O
+        // `enfileirarRecebimento()` só aceita `nao_emitir` — a decisão mora lá,
+        // e não aqui, para o webhook e o cron não terem como divergir.
+        $this->bomcontrole_model->enfileirarRecebimento((int) $fatura->id);
 
         return $this->resposta(TRUE, 'Baixa aplicada.', [
             'baixou' => TRUE,
